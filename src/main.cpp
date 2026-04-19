@@ -1,25 +1,47 @@
+#include "EventLoop.h"
+#include "Logger.h"
+#include "TcpServer.h"
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 #include <uv.h>
-#include "Logger.h"
-#include "EventLoop.h"
-
 int main() {
   Logger::Init();
   LOG_INFO("AsyCDisk Server Starting...");
-
-  // Test libuv via EventLoop
-  EventLoop loop;
-
   // Test sqlite3
   LOG_INFO("SQLite3 version: {}", sqlite3_libversion());
-
   // Test nlohmann json
   nlohmann::json j = {{"status", "ok"}, {"version", 1.0}};
   LOG_INFO("JSON check: {}", j.dump());
+  // Test libuv via EventLoop and TcpServer
+  EventLoop loop;
+  TcpServer server(&loop, "0.0.0.0", 8080);
 
+  server.SetNewConnectionCallback(
+      [&loop](uv_stream_t *server_stream, int status) {
+        if (status < 0) {
+          LOG_ERROR("New connection error: {}", uv_strerror(status));
+          return;
+        }
+
+        uv_tcp_t *client = new uv_tcp_t();
+        uv_tcp_init(loop.GetLoop(), client);
+
+        if (uv_accept(server_stream, (uv_stream_t *)client) == 0) {
+          LOG_INFO("Client connected!");
+          sleep(1);
+          uv_close((uv_handle_t *)client, [](uv_handle_t *handle) {
+            delete (uv_tcp_t *)handle;
+            LOG_INFO("Client disconnected.");
+          });
+        } else {
+          uv_close((uv_handle_t *)client,
+                   [](uv_handle_t *handle) { delete (uv_tcp_t *)handle; });
+        }
+      });
+  if (!server.Start()) {
+    return 1;
+  }
   loop.Run();
-
   return 0;
 }
