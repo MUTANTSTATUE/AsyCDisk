@@ -41,6 +41,7 @@ include_directories(include)
 # Add main executable
 add_executable(AsyCDisk 
     src/main.cpp
+    src/Logger.cpp
 )
 
 # Link libraries
