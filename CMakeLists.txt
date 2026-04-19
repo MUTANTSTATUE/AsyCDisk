@@ -42,6 +42,7 @@ include_directories(include)
 add_executable(AsyCDisk 
     src/main.cpp
     src/Logger.cpp
+    src/EventLoop.cpp
 )
 
 # Link libraries

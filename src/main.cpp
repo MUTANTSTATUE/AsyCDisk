@@ -3,15 +3,14 @@
 #include <sqlite3.h>
 #include <uv.h>
 #include "Logger.h"
+#include "EventLoop.h"
 
 int main() {
   Logger::Init();
   LOG_INFO("AsyCDisk Server Starting...");
 
-  // Test libuv
-  uv_loop_t *loop = new uv_loop_t();
-  uv_loop_init(loop);
-  LOG_INFO("libuv loop initialized.");
+  // Test libuv via EventLoop
+  EventLoop loop;
 
   // Test sqlite3
   LOG_INFO("SQLite3 version: {}", sqlite3_libversion());
@@ -20,9 +19,7 @@ int main() {
   nlohmann::json j = {{"status", "ok"}, {"version", 1.0}};
   LOG_INFO("JSON check: {}", j.dump());
 
-  uv_run(loop, UV_RUN_DEFAULT);
-  uv_loop_close(loop);
-  free(loop);
+  loop.Run();
 
   return 0;
 }

@@ -1,0 +1,7 @@
+[2026-04-19 21:14:02.104] [info] [26702] [main.cpp:10] AsyCDisk Server Starting...
+[2026-04-19 21:14:02.105] [info] [26702] [EventLoop.cpp:7] EventLoop initialized.
+[2026-04-19 21:14:02.105] [info] [26702] [main.cpp:16] SQLite3 version: 3.52.0
+[2026-04-19 21:14:02.105] [info] [26702] [main.cpp:20] JSON check: {"status":"ok","version":1.0}
+[2026-04-19 21:14:02.105] [info] [26702] [EventLoop.cpp:24] EventLoop running...
+[2026-04-19 21:14:02.105] [info] [26702] [EventLoop.cpp:26] EventLoop stopped.
+[2026-04-19 21:14:02.105] [info] [26702] [EventLoop.cpp:19] EventLoop destroyed.
