@@ -45,9 +45,18 @@ def test():
     s.connect(('127.0.0.1', 8080))
     print("[*] 成功连接到服务器 127.0.0.1:8080")
 
+    # 0. 注册测试
+    print("[*] 0. 正在测试用户注册 (testuser/test123)...")
+    pkt_reg = create_packet(5, {"username": "testuser", "password": "test123"})
+    s.sendall(pkt_reg)
+    cmd, status, resp_json, _ = recv_packet(s)
+    print(f"    [Register Response] Status: {status}, JSON: {resp_json}")
+
+    time.sleep(0.5)
+
     # 1. 登录测试
-    print("[*] 1. 正在测试登录 (admin/admin123)...")
-    pkt_login = create_packet(1, {"username": "admin", "password": "admin123"})
+    print("[*] 1. 正在测试登录 (testuser/test123)...")
+    pkt_login = create_packet(1, {"username": "testuser", "password": "test123"})
     s.sendall(pkt_login)
     
     cmd, status, resp_json, _ = recv_packet(s)

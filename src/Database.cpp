@@ -112,14 +112,50 @@ nlohmann::json Database::Query(const std::string& sql) {
 }
 
 bool Database::AuthenticateUser(const std::string& username, const std::string& password, int& user_id) {
-    // Note: In production, use hashed passwords!
-    std::string sql = "SELECT id FROM users WHERE username = '" + username + "' AND password = '" + password + "';";
-    auto res = Query(sql);
-    if (!res.empty()) {
-        user_id = res[0]["id"];
-        return true;
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "SELECT id FROM users WHERE username = ? AND password = ?;";
+    
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("Auth prepare failed: {}", sqlite3_errmsg(db_));
+        return false;
     }
-    return false;
+
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, password.c_str(), -1, SQLITE_STATIC);
+
+    bool success = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        user_id = sqlite3_column_int(stmt, 0);
+        success = true;
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+bool Database::RegisterUser(const std::string& username, const std::string& password) {
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "INSERT INTO users (username, password) VALUES (?, ?);";
+    
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("Register prepare failed: {}", sqlite3_errmsg(db_));
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, password.c_str(), -1, SQLITE_STATIC);
+
+    bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!success) {
+        LOG_ERROR("Register execution failed: {}", sqlite3_errmsg(db_));
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
 }
 
 nlohmann::json Database::ListFiles(int user_id, int parent_id) {

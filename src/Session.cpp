@@ -169,6 +169,9 @@ void Session::HandleMessage(const Protocol::Message &msg) {
   case Protocol::Command::Login:
     HandleLogin(msg);
     break;
+  case Protocol::Command::Register:
+    HandleRegister(msg);
+    break;
   case Protocol::Command::ListDir:
     HandleListDir(msg);
     break;
@@ -239,6 +242,27 @@ void Session::HandleLogin(const Protocol::Message &req) {
     LOG_WARN("Login failed for user: {}", username);
     SendResponse(Protocol::Command::Login, 401,
                  {{"msg", "invalid username or password"}}, {});
+  }
+}
+
+void Session::HandleRegister(const Protocol::Message &req) {
+  std::string username = req.json_payload.value("username", "");
+  std::string password = req.json_payload.value("password", "");
+
+  if (username.empty() || password.empty()) {
+    SendResponse(Protocol::Command::Register, 400,
+                 {{"msg", "username or password empty"}}, {});
+    return;
+  }
+
+  if (Database::GetInstance().RegisterUser(username, password)) {
+    LOG_INFO("New user registered: {}", username);
+    SendResponse(Protocol::Command::Register, 200, {{"msg", "register success"}},
+                 {});
+  } else {
+    LOG_WARN("Registration failed (user might exist): {}", username);
+    SendResponse(Protocol::Command::Register, 409,
+                 {{"msg", "registration failed or user already exists"}}, {});
   }
 }
 

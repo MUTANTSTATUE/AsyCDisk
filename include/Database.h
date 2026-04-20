@@ -21,6 +21,7 @@ public:
 
     // Business Logic Helpers
     bool AuthenticateUser(const std::string& username, const std::string& password, int& user_id);
+    bool RegisterUser(const std::string& username, const std::string& password);
     nlohmann::json ListFiles(int user_id, int parent_id);
     nlohmann::json GetFile(int user_id, int parent_id, const std::string& filename);
     bool AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path);
