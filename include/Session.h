@@ -23,6 +23,15 @@ public:
 private:
   void ProcessBuffer();
   void HandleMessage(const Protocol::Message& msg);
+
+  void SendResponse(Protocol::Command cmd, uint16_t status, const nlohmann::json& json_payload, const std::vector<char>& binary_payload);
+
+  void HandlePing(const Protocol::Message& req);
+  void HandleLogin(const Protocol::Message& req);
+  void HandleListDir(const Protocol::Message& req);
+  void HandleUploadReq(const Protocol::Message& req);
+  void HandleUploadData(const Protocol::Message& req);
+  void HandleDownloadReq(const Protocol::Message& req);
   struct WriteReq {
     uv_write_t req;
     uv_buf_t buf;
