@@ -289,9 +289,12 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
 
   if (current_offset >= total_size && total_size > 0) {
     // File already fully uploaded or larger?
-    // Sync to database just in case the record is missing.
-    Database::GetInstance().AddFile(user_id_, 0, filename, current_offset, false, full_path);
-    LOG_INFO("File already on disk, synced metadata to database: {}", filename);
+    // Sync to database only if the record is missing or size is different.
+    auto existing = Database::GetInstance().GetFile(user_id_, 0, filename);
+    if (existing.empty() || existing["filesize"] != (int64_t)current_offset) {
+        Database::GetInstance().AddFile(user_id_, 0, filename, current_offset, false, full_path);
+        LOG_INFO("File metadata synced to database (fixed missing/size): {}", filename);
+    }
 
     SendResponse(Protocol::Command::UploadReq, 200,
                  {{"msg", "already uploaded"}, {"offset", current_offset}}, {});
@@ -442,13 +445,16 @@ void Session::OnFileClose(uv_fs_t *req) {
   session->file_handle_ = -1;
 
   if (session->is_uploading_ && !session->current_filename_.empty()) {
-    std::string path = "data/" + std::to_string(session->user_id_) + "/" +
-                       session->current_filename_;
-    Database::GetInstance().AddFile(session->user_id_, 0,
-                                    session->current_filename_,
-                                    session->total_filesize_, false, path);
-    LOG_INFO("File metadata synced to database: {}",
-             session->current_filename_);
+    auto existing = Database::GetInstance().GetFile(session->user_id_, 0, session->current_filename_);
+    if (existing.empty() || existing["filesize"] != (int64_t)session->total_filesize_) {
+        std::string path = "data/" + std::to_string(session->user_id_) + "/" +
+                           session->current_filename_;
+        Database::GetInstance().AddFile(session->user_id_, 0,
+                                        session->current_filename_,
+                                        session->total_filesize_, false, path);
+        LOG_INFO("File metadata synced to database (upload complete): {}",
+                 session->current_filename_);
+    }
     session->current_filename_.clear();
   }
 

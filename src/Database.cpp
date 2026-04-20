@@ -128,6 +128,15 @@ nlohmann::json Database::ListFiles(int user_id, int parent_id) {
     return Query(sql);
 }
 
+nlohmann::json Database::GetFile(int user_id, int parent_id, const std::string& filename) {
+    std::string sql = "SELECT id, filename, filesize, is_dir, created_at FROM files WHERE owner_id = " + 
+                      std::to_string(user_id) + " AND parent_id = " + std::to_string(parent_id) + 
+                      " AND filename = '" + filename + "';";
+    auto res = Query(sql);
+    if (res.empty()) return nlohmann::json();
+    return res[0];
+}
+
 bool Database::AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path) {
     std::string sql = "INSERT OR REPLACE INTO files (owner_id, parent_id, filename, filesize, is_dir, file_path) VALUES (" +
                       std::to_string(owner_id) + ", " + 
