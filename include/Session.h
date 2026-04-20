@@ -3,6 +3,8 @@
 #include <memory>
 #include <uv.h>
 #include <vector>
+#include "Protocol.h"
+
 class Session : public std::enable_shared_from_this<Session> {
 public:
   using CloseCallback = std::function<void(std::shared_ptr<Session>)>;
@@ -15,10 +17,12 @@ public:
   void Start();
   void Close();
   void SetCloseCallback(CloseCallback cb) { on_close_ = std::move(cb); }
-  // Echo data back for now
+  // Send data helper
   void Send(const char *data, size_t len);
 
 private:
+  void ProcessBuffer();
+  void HandleMessage(const Protocol::Message& msg);
   struct WriteReq {
     uv_write_t req;
     uv_buf_t buf;
@@ -32,4 +36,5 @@ private:
   CloseCallback on_close_;
   // Keeps the session alive during async ops
   std::shared_ptr<Session> self_ref_;
+  std::vector<char> recv_buf_;
 };

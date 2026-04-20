@@ -49,14 +49,16 @@ void Session::OnRead(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
     Session* session = static_cast<Session*>(stream->data);
 
     if (nread > 0) {
-        LOG_INFO("Session received {} bytes.", nread);
-        // Echo test
-        session->Send(buf->base, nread);
+        LOG_TRACE("Session received {} bytes.", nread);
+        session->recv_buf_.insert(session->recv_buf_.end(), buf->base, buf->base + nread);
+        session->ProcessBuffer();
     } else if (nread < 0) {
-        if (nread != UV_EOF) {
-            LOG_ERROR("Session read error: {}", uv_err_name(nread));
-        } else {
+        if (nread == UV_EOF) {
             LOG_INFO("Session closed by client (EOF).");
+        } else if (nread == UV_ECONNRESET) {
+            LOG_INFO("Session connection reset by client (ECONNRESET).");
+        } else {
+            LOG_ERROR("Session read error: {}", uv_err_name(nread));
         }
         session->Close();
     }
@@ -84,4 +86,83 @@ void Session::OnClose(uv_handle_t* handle) {
     }
     // Release self-reference, allowing the object to be destroyed
     session->self_ref_.reset();
+}
+
+void Session::ProcessBuffer() {
+    while (recv_buf_.size() >= Protocol::HEADER_SIZE) {
+        Protocol::Header header;
+        std::memcpy(&header, recv_buf_.data(), Protocol::HEADER_SIZE);
+
+        if (header.magic != Protocol::MAGIC_NUMBER) {
+            LOG_ERROR("Invalid magic number 0x{:X}! Closing connection.", header.magic);
+            Close();
+            return;
+        }
+
+        size_t total_size = Protocol::HEADER_SIZE + header.json_len + header.binary_len;
+
+        // Security limit (e.g. 50MB per message max in memory)
+        if (total_size > 1024 * 1024 * 50) {
+            LOG_ERROR("Message too large! Size: {}. Closing connection.", total_size);
+            Close();
+            return;
+        }
+
+        if (recv_buf_.size() >= total_size) {
+            // We have a full packet
+            Protocol::Message msg;
+            msg.header = header;
+
+            size_t offset = Protocol::HEADER_SIZE;
+            if (header.json_len > 0) {
+                std::string json_str(recv_buf_.data() + offset, header.json_len);
+                try {
+                    msg.json_payload = nlohmann::json::parse(json_str);
+                } catch (const std::exception& e) {
+                    LOG_ERROR("JSON parse error: {}", e.what());
+                    Close();
+                    return;
+                }
+                offset += header.json_len;
+            }
+
+            if (header.binary_len > 0) {
+                msg.binary_payload.assign(recv_buf_.data() + offset, recv_buf_.data() + offset + header.binary_len);
+                offset += header.binary_len;
+            }
+
+            // Remove parsed data from buffer
+            recv_buf_.erase(recv_buf_.begin(), recv_buf_.begin() + total_size);
+
+            HandleMessage(msg);
+        } else {
+            // Not enough data yet
+            break;
+        }
+    }
+}
+
+void Session::HandleMessage(const Protocol::Message& msg) {
+    LOG_INFO("Received full message: CommandID={}, JSON='{}', BinarySize={}", 
+             static_cast<int>(msg.header.command),
+             msg.json_payload.dump(), 
+             msg.binary_payload.size());
+
+    // Echo back the same packet for testing
+    // In production, we will route to specific handlers based on CommandID
+    std::vector<char> response(Protocol::HEADER_SIZE + msg.header.json_len + msg.header.binary_len);
+    std::memcpy(response.data(), &msg.header, Protocol::HEADER_SIZE);
+    
+    size_t offset = Protocol::HEADER_SIZE;
+    if (msg.header.json_len > 0) {
+        std::string json_str = msg.json_payload.dump();
+        std::memcpy(response.data() + offset, json_str.c_str(), json_str.size());
+        offset += json_str.size();
+    }
+    
+    if (msg.header.binary_len > 0) {
+        std::memcpy(response.data() + offset, msg.binary_payload.data(), msg.binary_payload.size());
+    }
+
+    Send(response.data(), response.size());
 }
