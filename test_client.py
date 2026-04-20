@@ -67,57 +67,66 @@ def test():
     cmd, status, resp_json, _ = recv_packet(s)
     print(f"    [ListDir Response] Status: {status}, JSON: {resp_json}")
 
-    # 3. 文件上传测试
-    print("\n[*] 3. 正在测试文件上传...")
-    filename = "你好，这是中文.txt"
-    content = "你好，这是中文".encode('utf-8')
+    # 3. 文件上传测试 (断点续传)
+    print("\n[*] 3. 正在测试断点续传上传...")
+    filename = "resume_test.txt"
+    content = b"Part1_Data_Part2_Data_Part3_Data"
     
-    print(f"    [3.1] 发送上传请求: {filename}")
+    # [3.1] 先传前半部分
+    print(f"    [3.1] 模拟上传前半部分 (10 字节)...")
     pkt_up_req = create_packet(10, {"filename": filename, "filesize": len(content)})
     s.sendall(pkt_up_req)
-    
     cmd, status, resp_json, _ = recv_packet(s)
-    print(f"    [UploadReq Response] Status: {status}, JSON: {resp_json}")
     
     if status == 200:
-        print(f"    [3.2] 发送数据块 (大小: {len(content)} 字节)...")
-        pkt_data = create_packet(11, {}, content)
-        s.sendall(pkt_data)
-        
-        print(f"    [3.3] 发送结束标志 (空数据块)...")
-        pkt_eof = create_packet(11, {}, b"")
-        s.sendall(pkt_eof)
+        s.sendall(create_packet(11, {}, content[:10]))
+        # 故意不发完就关闭连接
+        print("    [!] 故意断开连接...")
+        s.close()
+    
+    time.sleep(1)
+    
+    # [3.2] 重新连接并续传
+    print(f"    [3.2] 重新连接并请求续传...")
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(('127.0.0.1', 8080))
+    s.sendall(create_packet(1, {"username": "admin", "password": "admin123"}))
+    recv_packet(s) # skip login resp
+    
+    s.sendall(create_packet(10, {"filename": filename, "filesize": len(content)}))
+    cmd, status, resp_json, _ = recv_packet(s)
+    offset = resp_json.get("offset", 0)
+    print(f"    [3.3] 服务器返回 offset: {offset}")
+    
+    if offset == 10:
+        print(f"    [3.4] 从 offset {offset} 继续发送剩余数据...")
+        s.sendall(create_packet(11, {}, content[offset:]))
+        s.sendall(create_packet(11, {}, b"")) # EOF
         
         cmd, status, resp_json, _ = recv_packet(s)
         print(f"    [Upload Result] Status: {status}, JSON: {resp_json}")
 
     time.sleep(1)
 
-    # 4. 文件下载测试
-    print("\n[*] 4. 正在测试文件下载...")
-    filename = "hello_world.txt"
-    print(f"    [4.1] 发送下载请求: {filename}")
-    pkt_down_req = create_packet(12, {"filename": filename})
+    # 4. 文件下载测试 (断点续传/Range)
+    print("\n[*] 4. 正在测试断点续传下载 (从 offset 6 开始)...")
+    print(f"    [4.1] 发送下载请求: {filename}, offset=6")
+    pkt_down_req = create_packet(12, {"filename": filename, "offset": 6})
     s.sendall(pkt_down_req)
     
     downloaded_content = b""
     while True:
         cmd, status, j_payload, b_payload = recv_packet(s)
         if cmd is None: break
-        
         downloaded_content += b_payload
-        if j_payload.get("eof"):
-            print(f"    [4.2] 下载完成! 收到 {len(downloaded_content)} 字节")
-            break
-        if status != 200:
-            print(f"    [!] 下载出错: {j_payload}")
-            break
+        if j_payload.get("eof"): break
     
-    if downloaded_content:
-        try:
-            print(f"    [4.3] 校验内容: {downloaded_content.decode()}")
-        except:
-            print(f"    [4.3] 校验内容: {downloaded_content}")
+    print(f"    [4.2] 下载完成! 内容: {downloaded_content.decode()}")
+    expected = content[6:].decode()
+    if downloaded_content.decode() == expected:
+        print("    [V] 下载内容校验通过!")
+    else:
+        print(f"    [X] 内容不匹配! 期望: {expected}")
 
     time.sleep(1)
     s.close()

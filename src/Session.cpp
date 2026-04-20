@@ -259,22 +259,43 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   }
 
   std::string filename = req.json_payload.value("filename", "unknown");
-  size_t filesize = req.json_payload.value("filesize", 0);
-  LOG_INFO("Client wants to upload file: {}, size: {}", filename, filesize);
+  size_t total_size = req.json_payload.value("filesize", 0);
+  LOG_INFO("Client wants to upload file: {}, total_size: {}", filename, total_size);
 
   std::string user_dir = "data/" + std::to_string(user_id_);
   std::string full_path = user_dir + "/" + filename;
 
-  // Ensure user directory exists (ignore error if already exists)
+  // 1. Ensure user directory exists
   uv_fs_mkdir(socket_.loop, &fs_req_, user_dir.c_str(), 0755, nullptr);
   uv_fs_req_cleanup(&fs_req_);
 
-  // Open file for writing
-  int r = uv_fs_open(socket_.loop, &fs_req_, full_path.c_str(),
-                     O_WRONLY | O_CREAT | O_TRUNC, 0644, Session::OnFileOpen);
+  // 2. Check if file already exists to support resumable upload
+  uint64_t current_offset = 0;
+  uv_fs_t stat_req;
+  int r = uv_fs_stat(socket_.loop, &stat_req, full_path.c_str(), nullptr);
+  if (r == 0) {
+      current_offset = stat_req.statbuf.st_size;
+      LOG_INFO("File exists, current size: {}", current_offset);
+  }
+  uv_fs_req_cleanup(&stat_req);
+
+  if (current_offset >= total_size && total_size > 0) {
+      // File already fully uploaded or larger?
+      SendResponse(Protocol::Command::UploadReq, 200, {{"msg", "already uploaded"}, {"offset", current_offset}}, {});
+      return;
+  }
+
+  // 3. Open file for writing (append-like mode: O_CREAT | O_WRONLY)
+  // Note: We don't use O_TRUNC here so we can resume.
+  r = uv_fs_open(socket_.loop, &fs_req_, full_path.c_str(),
+                     O_WRONLY | O_CREAT, 0644, Session::OnFileOpen);
   if (r < 0) {
     LOG_ERROR("uv_fs_open error: {}", uv_strerror(r));
     SendResponse(Protocol::Command::UploadReq, 500, {{"msg", "io error"}}, {});
+  } else {
+      // OnFileOpen will handle the response, but we need to pass the offset.
+      // We store the requested offset in the session.
+      file_offset_ = current_offset; 
   }
 }
 
@@ -337,20 +358,21 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   }
 
   std::string filename = req.json_payload.value("filename", "");
+  uint64_t offset = req.json_payload.value("offset", 0);
   if (filename.empty()) {
       SendResponse(Protocol::Command::DownloadData, 400, {{"msg", "missing filename"}}, {});
       return;
   }
 
   std::string full_path = "data/" + std::to_string(user_id_) + "/" + filename;
+  file_offset_ = offset;
   
   // Open file for reading
   int r = uv_fs_open(socket_.loop, &fs_req_, full_path.c_str(), O_RDONLY, 0, [](uv_fs_t* req){
       Session* session = static_cast<Session*>(req->data);
       if (req->result >= 0) {
           session->file_handle_ = req->result;
-          session->file_offset_ = 0;
-          LOG_INFO("File opened for reading: {}, fd: {}", req->path, session->file_handle_);
+          LOG_INFO("File opened for reading: {}, fd: {}, offset: {}", req->path, session->file_handle_, session->file_offset_);
           
           // Trigger first read
           uv_buf_t buf = uv_buf_init(session->file_read_buf_, sizeof(session->file_read_buf_));
@@ -372,9 +394,9 @@ void Session::OnFileOpen(uv_fs_t *req) {
   Session *session = static_cast<Session *>(req->data);
   if (req->result >= 0) {
     session->file_handle_ = req->result;
-    session->file_offset_ = 0;
-    LOG_INFO("File opened for writing, fd: {}", session->file_handle_);
-    session->SendResponse(Protocol::Command::UploadReq, 200, {{"msg", "ready"}}, {});
+    // session->file_offset_ is already set in HandleUploadReq or HandleDownloadReq
+    LOG_INFO("File opened successfully, fd: {}, start offset: {}", session->file_handle_, session->file_offset_);
+    session->SendResponse(Protocol::Command::UploadReq, 200, {{"msg", "ready"}, {"offset", session->file_offset_}}, {});
   } else {
     LOG_ERROR("OnFileOpen error: {}", uv_strerror(req->result));
     session->SendResponse(Protocol::Command::UploadReq, 500, {{"msg", "open failed"}}, {});
