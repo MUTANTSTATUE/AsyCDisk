@@ -37,7 +37,8 @@ bool Database::Open(const std::string& db_path) {
         "  is_dir INTEGER DEFAULT 0,"
         "  file_path TEXT,"
         "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
-        "  FOREIGN KEY(owner_id) REFERENCES users(id)"
+        "  FOREIGN KEY(owner_id) REFERENCES users(id),"
+        "  UNIQUE(owner_id, parent_id, filename)"
         ");";
 
     char* errMsg = nullptr;
@@ -128,7 +129,7 @@ nlohmann::json Database::ListFiles(int user_id, int parent_id) {
 }
 
 bool Database::AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path) {
-    std::string sql = "INSERT INTO files (owner_id, parent_id, filename, filesize, is_dir, file_path) VALUES (" +
+    std::string sql = "INSERT OR REPLACE INTO files (owner_id, parent_id, filename, filesize, is_dir, file_path) VALUES (" +
                       std::to_string(owner_id) + ", " + 
                       std::to_string(parent_id) + ", '" + 
                       filename + "', " + 

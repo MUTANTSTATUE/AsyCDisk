@@ -106,6 +106,21 @@ def test():
         cmd, status, resp_json, _ = recv_packet(s)
         print(f"    [Upload Result] Status: {status}, JSON: {resp_json}")
 
+        # [3.5] 校验数据库同步：再次获取文件列表
+        print(f"    [3.5] 校验数据库同步：正在获取文件列表...")
+        s.sendall(create_packet(2, {"parent_id": 0}))
+        cmd, status, resp_json, _ = recv_packet(s)
+        print(f"    [ListDir After Upload] JSON: {resp_json}")
+        
+        found = False
+        for f in resp_json.get("files", []):
+            if f["filename"] == filename:
+                found = True
+                print(f"    [V] 数据库同步校验成功：找到文件 {filename}，大小 {f['filesize']}")
+                break
+        if not found:
+            print(f"    [X] 数据库同步校验失败：未在列表中找到 {filename}")
+
     time.sleep(1)
 
     # 4. 文件下载测试 (断点续传/Range)
