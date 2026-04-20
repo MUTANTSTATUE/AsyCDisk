@@ -46,4 +46,5 @@ private:
   // Keeps the session alive during async ops
   std::shared_ptr<Session> self_ref_;
   std::vector<char> recv_buf_;
+  int user_id_ = -1;
 };

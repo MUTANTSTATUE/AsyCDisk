@@ -1,5 +1,6 @@
 #include "Session.h"
 #include "Logger.h"
+#include "Database.h"
 #include <cstring>
 
 Session::Session(uv_loop_t *loop) {
@@ -219,16 +220,28 @@ void Session::HandlePing(const Protocol::Message &req) {
 
 void Session::HandleLogin(const Protocol::Message &req) {
   std::string username = req.json_payload.value("username", "");
+  std::string password = req.json_payload.value("password", "");
   LOG_INFO("User login attempt: {}", username);
-  // TODO: Verify with SQLite
-  SendResponse(Protocol::Command::Login, 200,
-               {{"msg", "login success", "token", "dummy_token"}}, {});
+  
+  if (Database::GetInstance().AuthenticateUser(username, password, user_id_)) {
+      LOG_INFO("Login success for user: {} (ID: {})", username, user_id_);
+      SendResponse(Protocol::Command::Login, 200,
+                   {{"msg", "login success"}, {"user_id", user_id_}}, {});
+  } else {
+      LOG_WARN("Login failed for user: {}", username);
+      SendResponse(Protocol::Command::Login, 401, {{"msg", "invalid username or password"}}, {});
+  }
 }
 
 void Session::HandleListDir(const Protocol::Message &req) {
-  // TODO: Fetch directory list from SQLite
-  SendResponse(Protocol::Command::ListDir, 200,
-               {{"files", nlohmann::json::array()}}, {});
+  if (user_id_ == -1) {
+      SendResponse(Protocol::Command::ListDir, 403, {{"msg", "not logged in"}}, {});
+      return;
+  }
+
+  int parent_id = req.json_payload.value("parent_id", 0);
+  auto files = Database::GetInstance().ListFiles(user_id_, parent_id);
+  SendResponse(Protocol::Command::ListDir, 200, {{"files", files}}, {});
 }
 
 void Session::HandleUploadReq(const Protocol::Message &req) {

@@ -21,37 +21,28 @@ def test():
     s.connect(('127.0.0.1', 8080))
     print("[*] 成功连接到服务器 127.0.0.1:8080")
 
-    # 1. 正常包测试
-    print("[*] 1. 正在发送正常包 (完整的单次发送)...")
-    pkt1 = create_packet(0, {"msg": "Hello Normal"})
-    s.sendall(pkt1)
+    # 1. 登录测试
+    print("[*] 1. 正在测试登录 (admin/admin123)...")
+    pkt_login = create_packet(1, {"username": "admin", "password": "admin123"})
+    s.sendall(pkt_login)
     
-    # 读取服务器 Echo 回来的响应
     resp_header = s.recv(21)
-    print(f"    [Echo] 收到响应头: {len(resp_header)} 字节")
+    magic, ver, cmd, status, jlen, blen = struct.unpack(HEADER_FMT, resp_header)
+    resp_json = json.loads(s.recv(jlen).decode())
+    print(f"    [Login Response] Status: {status}, JSON: {resp_json}")
     
     time.sleep(0.5)
 
-    # 2. 拆包测试 (模拟网络极度拥堵/慢速)
-    print("\n[*] 2. 正在发送拆包/半包 (分两次发送一个完整的包)...")
-    pkt2 = create_packet(2, {"msg": "Hello Fragmented"}, b"BinaryPayload123")
-    print(f"    发送前 10 字节: {pkt2[:10]}")
-    s.sendall(pkt2[:10]) # 发送前 10 字节 (连包头都没发完)
+    # 2. 目录列表测试
+    print("\n[*] 2. 正在测试获取文件列表...")
+    pkt_list = create_packet(2, {"parent_id": 0})
+    s.sendall(pkt_list)
     
-    time.sleep(1) # 睡眠1秒，此时服务器收到10字节，不足21字节，不应该触发提取逻辑
-    
-    print(f"    发送剩余的 {len(pkt2[10:])} 字节...")
-    s.sendall(pkt2[10:]) # 发送剩余部分，此时服务器凑齐了包，应该触发提取
-    time.sleep(0.5)
+    resp_header = s.recv(21)
+    magic, ver, cmd, status, jlen, blen = struct.unpack(HEADER_FMT, resp_header)
+    resp_json = json.loads(s.recv(jlen).decode())
+    print(f"    [ListDir Response] Status: {status}, JSON: {resp_json}")
 
-    # 3. 粘包测试 (模拟快速/小包积压)
-    print("\n[*] 3. 正在发送粘包 (将三个包拼接到一起一次性发给服务器)...")
-    pkt3_1 = create_packet(10, {"task": "sticky 1"})
-    pkt3_2 = create_packet(11, {"task": "sticky 2"})
-    pkt3_3 = create_packet(12, {"task": "sticky 3"})
-    
-    s.sendall(pkt3_1 + pkt3_2 + pkt3_3)
-    
     time.sleep(1)
     s.close()
     print("\n[*] 测试完成，连接已关闭。")

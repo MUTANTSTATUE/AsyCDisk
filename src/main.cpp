@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include "TcpServer.h"
 #include "Session.h"
+#include "Database.h"
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -9,6 +10,12 @@
 int main() {
   Logger::Init();
   LOG_INFO("AsyCDisk Server Starting...");
+
+  // Initialize Database
+  if (!Database::GetInstance().Open("asycdisk.db")) {
+      LOG_CRITICAL("Failed to open database. Exiting.");
+      return 1;
+  }
   // Test sqlite3
   LOG_INFO("SQLite3 version: {}", sqlite3_libversion());
   // Test nlohmann json
