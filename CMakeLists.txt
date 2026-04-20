@@ -44,6 +44,7 @@ add_executable(AsyCDisk
     src/Logger.cpp
     src/EventLoop.cpp
     src/TcpServer.cpp
+    src/Session.cpp
 )
 
 # Link libraries

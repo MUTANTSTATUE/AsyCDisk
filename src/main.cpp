@@ -1,10 +1,13 @@
 #include "EventLoop.h"
 #include "Logger.h"
 #include "TcpServer.h"
+#include "Session.h"
 #include <iostream>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 #include <uv.h>
+
 int main() {
   Logger::Init();
   LOG_INFO("AsyCDisk Server Starting...");
@@ -16,29 +19,32 @@ int main() {
   // Test libuv via EventLoop and TcpServer
   EventLoop loop;
   TcpServer server(&loop, "0.0.0.0", 8080);
-
-  server.SetNewConnectionCallback(
-      [&loop](uv_stream_t *server_stream, int status) {
-        if (status < 0) {
+  
+  std::unordered_set<std::shared_ptr<Session>> active_sessions;
+  
+  server.SetNewConnectionCallback([&loop, &active_sessions](uv_stream_t* server_stream, int status) {
+      if (status < 0) {
           LOG_ERROR("New connection error: {}", uv_strerror(status));
           return;
-        }
-
-        uv_tcp_t *client = new uv_tcp_t();
-        uv_tcp_init(loop.GetLoop(), client);
-
-        if (uv_accept(server_stream, (uv_stream_t *)client) == 0) {
+      }
+      
+      auto session = std::make_shared<Session>(loop.GetLoop());
+      
+      if (uv_accept(server_stream, (uv_stream_t*)session->GetSocket()) == 0) {
           LOG_INFO("Client connected!");
-          sleep(1);
-          uv_close((uv_handle_t *)client, [](uv_handle_t *handle) {
-            delete (uv_tcp_t *)handle;
-            LOG_INFO("Client disconnected.");
+          active_sessions.insert(session);
+          
+          session->SetCloseCallback([&active_sessions](std::shared_ptr<Session> closed_session) {
+              active_sessions.erase(closed_session);
+              LOG_INFO("Session removed from active list.");
           });
-        } else {
-          uv_close((uv_handle_t *)client,
-                   [](uv_handle_t *handle) { delete (uv_tcp_t *)handle; });
-        }
-      });
+          
+          session->Start();
+      } else {
+          session->Close();
+      }
+  });
+
   if (!server.Start()) {
     return 1;
   }
