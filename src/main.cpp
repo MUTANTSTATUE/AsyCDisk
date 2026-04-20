@@ -16,6 +16,11 @@ int main() {
       LOG_CRITICAL("Failed to open database. Exiting.");
       return 1;
   }
+
+  // Ensure data directory exists
+  uv_fs_t mkdir_req;
+  uv_fs_mkdir(nullptr, &mkdir_req, "data", 0755, nullptr);
+  uv_fs_req_cleanup(&mkdir_req);
   // Test sqlite3
   LOG_INFO("SQLite3 version: {}", sqlite3_libversion());
   // Test nlohmann json

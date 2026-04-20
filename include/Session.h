@@ -47,4 +47,16 @@ private:
   std::shared_ptr<Session> self_ref_;
   std::vector<char> recv_buf_;
   int user_id_ = -1;
+
+  // File IO
+  uv_file file_handle_ = -1;
+  uint64_t file_offset_ = 0;
+  uv_fs_t fs_req_; // Reuse for sequential FS ops in this session
+
+  static void OnFileOpen(uv_fs_t* req);
+  static void OnFileWrite(uv_fs_t* req);
+  static void OnFileRead(uv_fs_t* req);
+  static void OnFileClose(uv_fs_t* req);
+
+  char file_read_buf_[16384]; // 16KB read buffer
 };

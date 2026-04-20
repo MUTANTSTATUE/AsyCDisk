@@ -6,9 +6,17 @@
 Session::Session(uv_loop_t *loop) {
   uv_tcp_init(loop, &socket_);
   socket_.data = this;
+  fs_req_.data = this;
 }
 
-Session::~Session() { LOG_INFO("Session destroyed."); }
+Session::~Session() {
+  if (file_handle_ != -1) {
+    uv_fs_t close_req;
+    uv_fs_close(socket_.loop, &close_req, file_handle_, nullptr);
+    uv_fs_req_cleanup(&close_req);
+  }
+  LOG_INFO("Session destroyed.");
+}
 
 void Session::Start() {
   self_ref_ = shared_from_this();
@@ -245,27 +253,168 @@ void Session::HandleListDir(const Protocol::Message &req) {
 }
 
 void Session::HandleUploadReq(const Protocol::Message &req) {
+  if (user_id_ == -1) {
+    SendResponse(Protocol::Command::UploadReq, 403, {{"msg", "not logged in"}}, {});
+    return;
+  }
+
   std::string filename = req.json_payload.value("filename", "unknown");
   size_t filesize = req.json_payload.value("filesize", 0);
   LOG_INFO("Client wants to upload file: {}, size: {}", filename, filesize);
-  // TODO: Prepare file stream (uv_fs_open)
-  SendResponse(Protocol::Command::UploadReq, 200, {{"msg", "ready for data"}},
-               {});
+
+  std::string user_dir = "data/" + std::to_string(user_id_);
+  std::string full_path = user_dir + "/" + filename;
+
+  // Ensure user directory exists (ignore error if already exists)
+  uv_fs_mkdir(socket_.loop, &fs_req_, user_dir.c_str(), 0755, nullptr);
+  uv_fs_req_cleanup(&fs_req_);
+
+  // Open file for writing
+  int r = uv_fs_open(socket_.loop, &fs_req_, full_path.c_str(),
+                     O_WRONLY | O_CREAT | O_TRUNC, 0644, Session::OnFileOpen);
+  if (r < 0) {
+    LOG_ERROR("uv_fs_open error: {}", uv_strerror(r));
+    SendResponse(Protocol::Command::UploadReq, 500, {{"msg", "io error"}}, {});
+  }
 }
 
 void Session::HandleUploadData(const Protocol::Message &req) {
-  LOG_INFO("Received {} bytes of file data.", req.header.binary_len);
-  // TODO: Write to uv_fs
-  SendResponse(Protocol::Command::UploadData, 200, {{"msg", "chunk received"}},
-               {});
+  if (file_handle_ == -1) {
+    SendResponse(Protocol::Command::UploadData, 400, {{"msg", "file not open"}}, {});
+    return;
+  }
+
+  if (req.header.binary_len == 0) {
+      // EOF or empty chunk
+      LOG_INFO("Upload finished for session.");
+      uv_fs_close(socket_.loop, &fs_req_, file_handle_, Session::OnFileClose);
+      return;
+  }
+
+  // We need to keep the data alive until uv_fs_write completes.
+  // Since we are using a shared_ptr for the session and the req is local to HandleMessage,
+  // we should copy the data.
+  struct WriteCtx {
+      Session* session;
+      std::vector<char> data;
+      uv_buf_t buf;
+  };
+  
+  WriteCtx* ctx = new WriteCtx();
+  ctx->session = this;
+  ctx->data = req.binary_payload;
+  ctx->buf = uv_buf_init(ctx->data.data(), ctx->data.size());
+
+  // Using a separate request for write to avoid conflicting with the session's fs_req_ 
+  // if multiple writes happen (though here they are sequential from client).
+  // Actually, for simplicity and safety, we'll use a new uv_fs_t for each write.
+  uv_fs_t* write_req = new uv_fs_t();
+  write_req->data = ctx;
+
+  int r = uv_fs_write(socket_.loop, write_req, file_handle_, &ctx->buf, 1, file_offset_, [](uv_fs_t* req){
+      WriteCtx* ctx = static_cast<WriteCtx*>(req->data);
+      if (req->result < 0) {
+          LOG_ERROR("uv_fs_write error: {}", uv_strerror(req->result));
+      } else {
+          ctx->session->file_offset_ += req->result;
+      }
+      uv_fs_req_cleanup(req);
+      delete req;
+      delete ctx;
+  });
+
+  if (r < 0) {
+      LOG_ERROR("uv_fs_write start error: {}", uv_strerror(r));
+      delete write_req;
+      delete ctx;
+  }
 }
 
 void Session::HandleDownloadReq(const Protocol::Message &req) {
-  std::string filename = req.json_payload.value("filename", "unknown");
-  LOG_INFO("Client requested download for: {}", filename);
+  if (user_id_ == -1) {
+    SendResponse(Protocol::Command::DownloadData, 403, {{"msg", "not logged in"}}, {});
+    return;
+  }
 
-  // TODO: Read from uv_fs. For now, simulate sending back dummy binary data.
-  std::vector<char> dummy_data(10, 'A');
-  SendResponse(Protocol::Command::DownloadData, 200,
-               {{"filename", filename}, {"eof", true}}, dummy_data);
+  std::string filename = req.json_payload.value("filename", "");
+  if (filename.empty()) {
+      SendResponse(Protocol::Command::DownloadData, 400, {{"msg", "missing filename"}}, {});
+      return;
+  }
+
+  std::string full_path = "data/" + std::to_string(user_id_) + "/" + filename;
+  
+  // Open file for reading
+  int r = uv_fs_open(socket_.loop, &fs_req_, full_path.c_str(), O_RDONLY, 0, [](uv_fs_t* req){
+      Session* session = static_cast<Session*>(req->data);
+      if (req->result >= 0) {
+          session->file_handle_ = req->result;
+          session->file_offset_ = 0;
+          LOG_INFO("File opened for reading: {}, fd: {}", req->path, session->file_handle_);
+          
+          // Trigger first read
+          uv_buf_t buf = uv_buf_init(session->file_read_buf_, sizeof(session->file_read_buf_));
+          uv_fs_read(session->socket_.loop, req, session->file_handle_, &buf, 1, session->file_offset_, Session::OnFileRead);
+      } else {
+          LOG_ERROR("Failed to open file for download: {}", uv_strerror(req->result));
+          session->SendResponse(Protocol::Command::DownloadData, 404, {{"msg", "file not found"}}, {});
+          uv_fs_req_cleanup(req);
+      }
+  });
+  
+  if (r < 0) {
+      LOG_ERROR("uv_fs_open start error: {}", uv_strerror(r));
+      SendResponse(Protocol::Command::DownloadData, 500, {{"msg", "io error"}}, {});
+  }
 }
+
+void Session::OnFileOpen(uv_fs_t *req) {
+  Session *session = static_cast<Session *>(req->data);
+  if (req->result >= 0) {
+    session->file_handle_ = req->result;
+    session->file_offset_ = 0;
+    LOG_INFO("File opened for writing, fd: {}", session->file_handle_);
+    session->SendResponse(Protocol::Command::UploadReq, 200, {{"msg", "ready"}}, {});
+  } else {
+    LOG_ERROR("OnFileOpen error: {}", uv_strerror(req->result));
+    session->SendResponse(Protocol::Command::UploadReq, 500, {{"msg", "open failed"}}, {});
+  }
+  uv_fs_req_cleanup(req);
+}
+
+void Session::OnFileClose(uv_fs_t *req) {
+  Session *session = static_cast<Session *>(req->data);
+  LOG_INFO("File closed, fd: {}", session->file_handle_);
+  session->file_handle_ = -1;
+  session->SendResponse(Protocol::Command::UploadData, 200, {{"msg", "upload complete"}}, {});
+  uv_fs_req_cleanup(req);
+}
+
+void Session::OnFileWrite(uv_fs_t *req) {
+    // Handled in-line in HandleUploadData for now to simplify
+}
+
+void Session::OnFileRead(uv_fs_t *req) {
+  Session *session = static_cast<Session *>(req->data);
+  if (req->result > 0) {
+      size_t bytes_read = req->result;
+      session->file_offset_ += bytes_read;
+      
+      std::vector<char> data(session->file_read_buf_, session->file_read_buf_ + bytes_read);
+      session->SendResponse(Protocol::Command::DownloadData, 200, {{"eof", false}}, data);
+      
+      // Continue reading next chunk
+      uv_buf_t buf = uv_buf_init(session->file_read_buf_, sizeof(session->file_read_buf_));
+      uv_fs_read(session->socket_.loop, req, session->file_handle_, &buf, 1, session->file_offset_, Session::OnFileRead);
+  } else if (req->result == 0) {
+      // EOF
+      LOG_INFO("Download complete for session.");
+      session->SendResponse(Protocol::Command::DownloadData, 200, {{"eof", true}}, {});
+      uv_fs_close(session->socket_.loop, req, session->file_handle_, Session::OnFileClose);
+  } else {
+      LOG_ERROR("uv_fs_read error: {}", uv_strerror(req->result));
+      session->SendResponse(Protocol::Command::DownloadData, 500, {{"msg", "read error"}}, {});
+      uv_fs_close(session->socket_.loop, req, session->file_handle_, Session::OnFileClose);
+  }
+}
+
