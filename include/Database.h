@@ -25,6 +25,7 @@ public:
     nlohmann::json ListFiles(int user_id, int parent_id);
     nlohmann::json GetFile(int user_id, int parent_id, const std::string& filename);
     bool AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path);
+    bool DeleteFile(int owner_id, int parent_id, const std::string& filename);
 
 private:
     Database() = default;

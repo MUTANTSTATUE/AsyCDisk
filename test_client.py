@@ -90,6 +90,7 @@ def test():
     if status == 200:
         s.sendall(create_packet(11, {}, content[:10]))
         # 故意不发完就关闭连接
+        time.sleep(0.5)
         print("    [!] 故意断开连接...")
         s.close()
     
@@ -99,7 +100,7 @@ def test():
     print(f"    [3.2] 重新连接并请求续传...")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect(('127.0.0.1', 8080))
-    s.sendall(create_packet(1, {"username": "admin", "password": "admin123"}))
+    s.sendall(create_packet(1, {"username": "testuser", "password": "test123"}))
     recv_packet(s) # skip login resp
     
     s.sendall(create_packet(10, {"filename": filename, "filesize": len(content)}))
@@ -151,6 +152,34 @@ def test():
         print("    [V] 下载内容校验通过!")
     else:
         print(f"    [X] 内容不匹配! 期望: {expected}")
+
+    time.sleep(1)
+
+
+    
+    # 5. 文件删除测试
+    print("\n[*] 5. 正在测试文件删除...")
+    print(f"    [5.1] 发送删除请求: {filename}")
+    pkt_rm = create_packet(4, {"filename": filename, "parent_id": 0})
+    s.sendall(pkt_rm)
+    cmd, status, resp_json, _ = recv_packet(s)
+    print(f"    [Remove Response] Status: {status}, JSON: {resp_json}")
+
+    # [5.2] 再次获取列表确认删除
+    print("    [5.2] 再次获取文件列表以确认删除...")
+    s.sendall(create_packet(2, {"parent_id": 0}))
+    cmd, status, resp_json, _ = recv_packet(s)
+    print(f"    [ListDir After Remove] JSON: {resp_json}")
+    
+    found = False
+    for f in resp_json.get("files", []):
+        if f["filename"] == filename:
+            found = True
+            break
+    if not found:
+        print("    [V] 文件删除校验成功！")
+    else:
+        print("    [X] 文件删除校验失败：文件依然存在。")
 
     time.sleep(1)
     s.close()

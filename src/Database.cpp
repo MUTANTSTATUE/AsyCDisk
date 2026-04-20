@@ -183,3 +183,27 @@ bool Database::AddFile(int owner_id, int parent_id, const std::string& filename,
                       path + "');";
     return Execute(sql);
 }
+
+bool Database::DeleteFile(int owner_id, int parent_id, const std::string& filename) {
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "DELETE FROM files WHERE owner_id = ? AND parent_id = ? AND filename = ?;";
+    
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("DeleteFile prepare failed: {}", sqlite3_errmsg(db_));
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, owner_id);
+    sqlite3_bind_int(stmt, 2, parent_id);
+    sqlite3_bind_text(stmt, 3, filename.c_str(), -1, SQLITE_STATIC);
+
+    bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!success) {
+        LOG_ERROR("DeleteFile execution failed: {}", sqlite3_errmsg(db_));
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
+}

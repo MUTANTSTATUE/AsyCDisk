@@ -175,6 +175,9 @@ void Session::HandleMessage(const Protocol::Message &msg) {
   case Protocol::Command::ListDir:
     HandleListDir(msg);
     break;
+  case Protocol::Command::Remove:
+    HandleRemove(msg);
+    break;
   case Protocol::Command::UploadReq:
     HandleUploadReq(msg);
     break;
@@ -257,8 +260,8 @@ void Session::HandleRegister(const Protocol::Message &req) {
 
   if (Database::GetInstance().RegisterUser(username, password)) {
     LOG_INFO("New user registered: {}", username);
-    SendResponse(Protocol::Command::Register, 200, {{"msg", "register success"}},
-                 {});
+    SendResponse(Protocol::Command::Register, 200,
+                 {{"msg", "register success"}}, {});
   } else {
     LOG_WARN("Registration failed (user might exist): {}", username);
     SendResponse(Protocol::Command::Register, 409,
@@ -276,6 +279,63 @@ void Session::HandleListDir(const Protocol::Message &req) {
   int parent_id = req.json_payload.value("parent_id", 0);
   auto files = Database::GetInstance().ListFiles(user_id_, parent_id);
   SendResponse(Protocol::Command::ListDir, 200, {{"files", files}}, {});
+}
+
+void Session::HandleRemove(const Protocol::Message &req) {
+  if (user_id_ == -1) {
+    SendResponse(Protocol::Command::Remove, 403, {{"msg", "not logged in"}},
+                 {});
+    return;
+  }
+
+  std::string filename = req.json_payload.value("filename", "");
+  int parent_id = req.json_payload.value("parent_id", 0);
+
+  if (filename.empty()) {
+    SendResponse(Protocol::Command::Remove, 400, {{"msg", "missing filename"}},
+                 {});
+    return;
+  }
+
+  // 1. Delete from database
+  if (!Database::GetInstance().DeleteFile(user_id_, parent_id, filename)) {
+    SendResponse(Protocol::Command::Remove, 500, {{"msg", "db error"}}, {});
+    return;
+  }
+
+  // 2. Delete from filesystem (Async)
+  std::string full_path = "data/" + std::to_string(user_id_) + "/" + filename;
+
+  // Note: We use a new uv_fs_t for unlink to avoid conflict with other active
+  // FS ops if any
+  uv_fs_t *unlink_req = new uv_fs_t();
+  unlink_req->data = new std::shared_ptr<Session>(shared_from_this());
+
+  int r = uv_fs_unlink(
+      socket_.loop, unlink_req, full_path.c_str(), [](uv_fs_t *req) {
+        auto *session_ptr = static_cast<std::shared_ptr<Session> *>(req->data);
+        auto session = *session_ptr;
+        if (req->result < 0 && req->result != UV_ENOENT) {
+          LOG_ERROR("uv_fs_unlink error: {}", uv_strerror(req->result));
+          session->SendResponse(Protocol::Command::Remove, 500,
+                                {{"msg", "filesystem error"}}, {});
+        } else {
+          LOG_INFO("File deleted: {}", req->path);
+          session->SendResponse(Protocol::Command::Remove, 200,
+                                {{"msg", "success"}}, {});
+        }
+        uv_fs_req_cleanup(req);
+        delete session_ptr;
+        delete req;
+      });
+
+  if (r < 0) {
+    LOG_ERROR("uv_fs_unlink start error: {}", uv_strerror(r));
+    delete static_cast<std::shared_ptr<Session> *>(unlink_req->data);
+    delete unlink_req;
+    SendResponse(Protocol::Command::Remove, 500,
+                 {{"msg", "unlink failed to start"}}, {});
+  }
 }
 
 void Session::HandleUploadReq(const Protocol::Message &req) {
@@ -316,8 +376,10 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
     // Sync to database only if the record is missing or size is different.
     auto existing = Database::GetInstance().GetFile(user_id_, 0, filename);
     if (existing.empty() || existing["filesize"] != (int64_t)current_offset) {
-        Database::GetInstance().AddFile(user_id_, 0, filename, current_offset, false, full_path);
-        LOG_INFO("File metadata synced to database (fixed missing/size): {}", filename);
+      Database::GetInstance().AddFile(user_id_, 0, filename, current_offset,
+                                      false, full_path);
+      LOG_INFO("File metadata synced to database (fixed missing/size): {}",
+               filename);
     }
 
     SendResponse(Protocol::Command::UploadReq, 200,
@@ -326,16 +388,17 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   }
 
   // 3. Open file for writing (append-like mode: O_CREAT | O_WRONLY)
-  // Note: We don't use O_TRUNC here so we can resume.
-  r = uv_fs_open(socket_.loop, &fs_req_, full_path.c_str(), O_WRONLY | O_CREAT,
+  file_offset_ = current_offset;
+  uv_fs_t *open_req = new uv_fs_t();
+  open_req->data = new std::shared_ptr<Session>(shared_from_this());
+
+  r = uv_fs_open(socket_.loop, open_req, full_path.c_str(), O_WRONLY | O_CREAT,
                  0644, Session::OnFileOpen);
   if (r < 0) {
     LOG_ERROR("uv_fs_open error: {}", uv_strerror(r));
+    delete static_cast<std::shared_ptr<Session> *>(open_req->data);
+    delete open_req;
     SendResponse(Protocol::Command::UploadReq, 500, {{"msg", "io error"}}, {});
-  } else {
-    // OnFileOpen will handle the response, but we need to pass the offset.
-    // We store the requested offset in the session.
-    file_offset_ = current_offset;
   }
 }
 
@@ -349,44 +412,39 @@ void Session::HandleUploadData(const Protocol::Message &req) {
   if (req.header.binary_len == 0) {
     // EOF or empty chunk
     LOG_INFO("Upload finished for session.");
-    uv_fs_close(socket_.loop, &fs_req_, file_handle_, Session::OnFileClose);
+    uv_fs_t *close_req = new uv_fs_t();
+    close_req->data = new std::shared_ptr<Session>(shared_from_this());
+    uv_fs_close(socket_.loop, close_req, file_handle_, Session::OnFileClose);
     return;
   }
 
-  // We need to keep the data alive until uv_fs_write completes.
-  // Since we are using a shared_ptr for the session and the req is local to
-  // HandleMessage, we should copy the data.
   struct WriteCtx {
-    Session *session;
+    std::shared_ptr<Session> session;
     std::vector<char> data;
     uv_buf_t buf;
   };
 
   WriteCtx *ctx = new WriteCtx();
-  ctx->session = this;
+  ctx->session = shared_from_this();
   ctx->data = req.binary_payload;
   ctx->buf = uv_buf_init(ctx->data.data(), ctx->data.size());
 
-  // Using a separate request for write to avoid conflicting with the session's
-  // fs_req_ if multiple writes happen (though here they are sequential from
-  // client). Actually, for simplicity and safety, we'll use a new uv_fs_t for
-  // each write.
   uv_fs_t *write_req = new uv_fs_t();
   write_req->data = ctx;
 
-  int r = uv_fs_write(socket_.loop, write_req, file_handle_, &ctx->buf, 1,
-                      file_offset_, [](uv_fs_t *req) {
-                        WriteCtx *ctx = static_cast<WriteCtx *>(req->data);
-                        if (req->result < 0) {
-                          LOG_ERROR("uv_fs_write error: {}",
-                                    uv_strerror(req->result));
-                        } else {
-                          ctx->session->file_offset_ += req->result;
-                        }
-                        uv_fs_req_cleanup(req);
-                        delete req;
-                        delete ctx;
-                      });
+  int r = uv_fs_write(
+      socket_.loop, write_req, file_handle_, &ctx->buf, 1, file_offset_,
+      [](uv_fs_t *req) {
+        WriteCtx *ctx = static_cast<WriteCtx *>(req->data);
+        if (req->result < 0) {
+          LOG_ERROR("uv_fs_write error: {}", uv_strerror(req->result));
+        } else {
+          ctx->session->file_offset_ += req->result;
+        }
+        uv_fs_req_cleanup(req);
+        delete req;
+        delete ctx; // shared_ptr inside ctx will be released here
+      });
 
   if (r < 0) {
     LOG_ERROR("uv_fs_write start error: {}", uv_strerror(r));
@@ -415,9 +473,13 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   is_uploading_ = false;
 
   // Open file for reading
+  uv_fs_t *open_req = new uv_fs_t();
+  open_req->data = new std::shared_ptr<Session>(shared_from_this());
+
   int r = uv_fs_open(
-      socket_.loop, &fs_req_, full_path.c_str(), O_RDONLY, 0, [](uv_fs_t *req) {
-        Session *session = static_cast<Session *>(req->data);
+      socket_.loop, open_req, full_path.c_str(), O_RDONLY, 0, [](uv_fs_t *req) {
+        auto *session_ptr = static_cast<std::shared_ptr<Session> *>(req->data);
+        auto session = *session_ptr;
         if (req->result >= 0) {
           session->file_handle_ = req->result;
           LOG_INFO("File opened for reading: {}, fd: {}, offset: {}", req->path,
@@ -434,18 +496,24 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
           session->SendResponse(Protocol::Command::DownloadData, 404,
                                 {{"msg", "file not found"}}, {});
           uv_fs_req_cleanup(req);
+          delete session_ptr;
+          delete req;
         }
       });
 
   if (r < 0) {
     LOG_ERROR("uv_fs_open start error: {}", uv_strerror(r));
+    delete static_cast<std::shared_ptr<Session> *>(open_req->data);
+    delete open_req;
     SendResponse(Protocol::Command::DownloadData, 500, {{"msg", "io error"}},
                  {});
   }
 }
 
 void Session::OnFileOpen(uv_fs_t *req) {
-  Session *session = static_cast<Session *>(req->data);
+  auto *session_ptr = static_cast<std::shared_ptr<Session> *>(req->data);
+  auto session = *session_ptr;
+
   if (req->result >= 0) {
     session->file_handle_ = req->result;
     // session->file_offset_ is already set in HandleUploadReq or
@@ -461,30 +529,38 @@ void Session::OnFileOpen(uv_fs_t *req) {
                           {{"msg", "open failed"}}, {});
   }
   uv_fs_req_cleanup(req);
+  delete session_ptr;
+  delete req;
 }
 
 void Session::OnFileClose(uv_fs_t *req) {
-  Session *session = static_cast<Session *>(req->data);
+  auto *session_ptr = static_cast<std::shared_ptr<Session> *>(req->data);
+  auto session = *session_ptr;
+
   LOG_INFO("File closed, fd: {}", session->file_handle_);
   session->file_handle_ = -1;
 
   if (session->is_uploading_ && !session->current_filename_.empty()) {
-    auto existing = Database::GetInstance().GetFile(session->user_id_, 0, session->current_filename_);
-    if (existing.empty() || existing["filesize"] != (int64_t)session->total_filesize_) {
-        std::string path = "data/" + std::to_string(session->user_id_) + "/" +
-                           session->current_filename_;
-        Database::GetInstance().AddFile(session->user_id_, 0,
-                                        session->current_filename_,
-                                        session->total_filesize_, false, path);
-        LOG_INFO("File metadata synced to database (upload complete): {}",
-                 session->current_filename_);
+    auto existing = Database::GetInstance().GetFile(session->user_id_, 0,
+                                                    session->current_filename_);
+    if (existing.empty() ||
+        existing["filesize"] != (int64_t)session->total_filesize_) {
+      std::string path = "data/" + std::to_string(session->user_id_) + "/" +
+                         session->current_filename_;
+      Database::GetInstance().AddFile(session->user_id_, 0,
+                                      session->current_filename_,
+                                      session->total_filesize_, false, path);
+      LOG_INFO("File metadata synced to database (upload complete): {}",
+               session->current_filename_);
     }
     session->current_filename_.clear();
+    session->SendResponse(Protocol::Command::UploadData, 200,
+                          {{"msg", "upload complete"}}, {});
   }
 
-  session->SendResponse(Protocol::Command::UploadData, 200,
-                        {{"msg", "upload complete"}}, {});
   uv_fs_req_cleanup(req);
+  delete session_ptr;
+  delete req;
 }
 
 void Session::OnFileWrite(uv_fs_t *req) {
@@ -492,7 +568,8 @@ void Session::OnFileWrite(uv_fs_t *req) {
 }
 
 void Session::OnFileRead(uv_fs_t *req) {
-  Session *session = static_cast<Session *>(req->data);
+  auto *session_ptr = static_cast<std::shared_ptr<Session> *>(req->data);
+  auto session = *session_ptr;
   if (req->result > 0) {
     size_t bytes_read = req->result;
     session->file_offset_ += bytes_read;

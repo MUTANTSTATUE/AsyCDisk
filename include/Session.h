@@ -32,6 +32,7 @@ private:
   void HandleLogin(const Protocol::Message &req);
   void HandleRegister(const Protocol::Message &req);
   void HandleListDir(const Protocol::Message &req);
+  void HandleRemove(const Protocol::Message &req);
   void HandleUploadReq(const Protocol::Message &req);
   void HandleUploadData(const Protocol::Message &req);
   void HandleDownloadReq(const Protocol::Message &req);
