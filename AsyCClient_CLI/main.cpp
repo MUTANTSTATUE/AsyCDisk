@@ -82,6 +82,7 @@ public:
     header.version = Protocol::CURRENT_VERSION;
     header.command = static_cast<uint16_t>(cmd);
     header.status = 0;
+    header.stream_id = current_stream_id_;
     header.json_len = j_str.size();
     header.binary_len = b_payload.size();
 
@@ -106,6 +107,9 @@ public:
     if (header.magic != Protocol::MAGIC_NUMBER)
       return false;
 
+    // Check if the packet is for our current stream (for now we only have one)
+    // In the future, this will be handled by a message dispatcher.
+    
     if (header.json_len > 0) {
       std::string j_str(header.json_len, 0);
       recv(sock_, &j_str[0], header.json_len, MSG_WAITALL);
@@ -119,6 +123,7 @@ public:
   }
 
   void Login(const std::string &user, const std::string &pass) {
+    current_stream_id_++;
     if (!SendPacket(Protocol::Command::Login,
                     {{"username", user}, {"password", pass}}))
       return;
@@ -135,6 +140,7 @@ public:
   }
 
   void List() {
+    current_stream_id_++;
     if (!SendPacket(Protocol::Command::ListDir, {{"parent_id", 0}}))
       return;
     Protocol::Header h;
@@ -155,6 +161,7 @@ public:
   }
 
   void Upload(const std::string &local_path) {
+    current_stream_id_++;
     std::ifstream file(local_path, std::ios::binary);
     if (!file) {
       std::cout << "[ERR] Cannot open local file." << std::endl;
@@ -206,6 +213,7 @@ public:
   }
 
   void Download(const std::string &arg) {
+    current_stream_id_++;
     if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
       std::cout << "[ERR] Please provide a valid numeric File ID. Use 'ls' to "
                    "see IDs."
@@ -257,6 +265,7 @@ public:
   }
 
   void Remove(const std::string &arg) {
+    current_stream_id_++;
     if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
       std::cout << "[ERR] Please provide a valid numeric File ID. Use 'ls' to "
                    "see IDs."
@@ -281,6 +290,7 @@ private:
   std::string ip_;
   uint16_t port_;
   int sock_ = -1;
+  uint32_t current_stream_id_ = 1;
 };
 
 int main() {

@@ -22,13 +22,14 @@ struct Header {
   uint8_t version;     // 1 byte:  Protocol Version
   uint16_t command;    // 2 bytes: Command ID
   uint16_t status;     // 2 bytes: Status Code (0 for req, 200/40x/50x for resp)
+  uint32_t stream_id;  // 4 bytes: Stream ID for multiplexing
   uint32_t json_len;   // 4 bytes: Length of the JSON payload
   uint64_t binary_len; // 8 bytes: Length of the raw Binary payload
 };
 #pragma pack(pop)
 
-// Ensure the header size is exactly 21 bytes
-static_assert(sizeof(Header) == 21, "Header size must be 21 bytes");
+// Ensure the header size is exactly 25 bytes
+static_assert(sizeof(Header) == 25, "Header size must be 25 bytes");
 constexpr size_t HEADER_SIZE = sizeof(Header);
 
 // Defined Command IDs

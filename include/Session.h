@@ -1,7 +1,9 @@
 #pragma once
 #include "Protocol.h"
+#include "FileTask.h"
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <uv.h>
 #include <vector>
 
@@ -25,6 +27,7 @@ private:
   void HandleMessage(const Protocol::Message &msg);
 
   void SendResponse(Protocol::Command cmd, uint16_t status,
+                    uint32_t stream_id,
                     const nlohmann::json &json_payload,
                     const std::vector<char> &binary_payload);
 
@@ -52,20 +55,11 @@ private:
   std::vector<char> recv_buf_;
   int user_id_ = -1;
 
-  // File IO
-  std::string current_filename_;
-  uint32_t pending_fs_reqs_ = 0;
-  bool closing_pending_ = false;
-  uv_file file_handle_ = -1;
-  uint64_t file_offset_ = 0;
-  uint64_t total_filesize_ = 0;
-  bool is_uploading_ = false;
-  uv_fs_t fs_req_; // Reuse for sequential FS ops in this session
+  // File IO (Multiplexed)
+  std::unordered_map<uint32_t, std::shared_ptr<FileTask>> active_tasks_;
 
   static void OnFileOpen(uv_fs_t *req);
   static void OnFileWrite(uv_fs_t *req);
   static void OnFileRead(uv_fs_t *req);
   static void OnFileClose(uv_fs_t *req);
-
-  char file_read_buf_[16384]; // 16KB read buffer
 };
