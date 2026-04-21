@@ -177,57 +177,52 @@ Protocol::Message AsyCClient::WaitNextMessage(uint32_t stream_id) {
   return msg;
 }
 
-void AsyCClient::Login(const std::string &user, const std::string &pass) {
+bool AsyCClient::Login(const std::string &user, const std::string &pass) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
   if (!SendPacket(Protocol::Command::Login, sid,
                   {{"username", user}, {"password", pass}})) {
     DeleteStream(sid);
-    return;
+    return false;
   }
   
   auto msg = WaitNextMessage(sid);
+  bool success = false;
   if (msg.header.magic != 0 && msg.header.status == 200) {
     std::cout << "[OK] Login successful. UserID: " << msg.json_payload["user_id"]
               << std::endl;
+    success = true;
   } else {
     std::cout << "[ERR] Login failed: " << msg.json_payload.value("msg", "unknown error")
               << std::endl;
   }
   DeleteStream(sid);
+  return success;
 }
 
-void AsyCClient::List() {
+json AsyCClient::List() {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
   if (!SendPacket(Protocol::Command::ListDir, sid, {{"parent_id", 0}})) {
     DeleteStream(sid);
-    return;
+    return {};
   }
 
   auto msg = WaitNextMessage(sid);
+  json result = {};
   if (msg.header.magic != 0 && msg.header.status == 200) {
-    std::cout << std::left << std::setw(8) << "ID" << std::setw(42)
-              << "Filename" << std::setw(15) << "Size"
-              << "Created At" << std::endl;
-    std::cout << std::string(85, '-') << std::endl;
-    for (auto &f : msg.json_payload["files"]) {
-      std::cout << std::left << std::setw(8) << f["id"].get<int>()
-                << std::setw(42) << f["filename"].get<std::string>()
-                << std::setw(15) << FormatSize(f["filesize"].get<uint64_t>())
-                << f["created_at"].get<std::string>() << std::endl;
-    }
-  } else {
-    std::cout << "[ERR] List failed." << std::endl;
+    result = msg.json_payload["files"];
   }
   DeleteStream(sid);
+  return result;
 }
 
-void AsyCClient::Upload(const std::string &local_path) {
+void AsyCClient::Upload(const std::string &local_path, 
+                        std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
 
-  std::thread([this, local_path, sid]() {
+  std::thread([this, local_path, sid, cb]() {
     std::ifstream file(local_path, std::ios::binary);
     if (!file) {
       std::cout << "\n[Stream #" << sid << " ERR] Cannot open local file: " << local_path << std::endl;
@@ -269,6 +264,7 @@ void AsyCClient::Upload(const std::string &local_path) {
       if (!SendPacket(Protocol::Command::UploadData, sid, {}, chunk))
         break;
       uploaded += read;
+      if (cb) cb(sid, uploaded, filesize);
     }
 
     // Send completion signal (empty binary)
@@ -276,6 +272,7 @@ void AsyCClient::Upload(const std::string &local_path) {
     
     auto msg_done = WaitNextMessage(sid);
     if (msg_done.header.status == 200) {
+      if (cb) cb(sid, filesize, filesize);
       std::cout << "\n[Stream #" << sid << " OK] Upload finished: " << filename << std::endl;
     } else {
       std::cout << "\n[Stream #" << sid << " ERR] Upload error at finalization." << std::endl;
@@ -287,78 +284,69 @@ void AsyCClient::Upload(const std::string &local_path) {
   std::cout << "[INFO] Upload started in background (Stream #" << sid << ")" << std::endl;
 }
 
-void AsyCClient::Download(const std::string &arg) {
+void AsyCClient::Download(int file_id, 
+                          std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb) {
   uint32_t sid = next_stream_id_++;
-  if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
-    std::cout << "[ERR] Please provide a valid numeric File ID." << std::endl;
-    return;
-  }
-
-  int file_id = std::stoi(arg);
   CreateStream(sid);
 
-  std::thread([this, file_id, sid]() {
-    if (!SendPacket(Protocol::Command::DownloadReq, sid,
-                    {{"file_id", file_id}, {"offset", 0}})) {
+  std::thread([this, file_id, sid, cb]() {
+    if (!SendPacket(Protocol::Command::DownloadReq, sid, {{"file_id", file_id}})) {
       DeleteStream(sid);
       return;
     }
 
     auto msg_init = WaitNextMessage(sid);
     if (msg_init.header.magic == 0 || msg_init.header.status != 200) {
-      std::cout << "\n[Stream #" << sid << " ERR] Download rejected by server." << std::endl;
       DeleteStream(sid);
       return;
     }
 
-    uint64_t total_size = msg_init.json_payload.value("total_size", 0);
     std::string filename = msg_init.json_payload.value("filename", "downloaded_file");
-    std::cout << "\n[Stream #" << sid << " INFO] Starting download: " << filename << " (" << total_size << " bytes)" << std::endl;
-
+    uint64_t filesize = msg_init.json_payload.value("filesize", 
+                          msg_init.json_payload.value("total_size", (uint64_t)0));
+    
     std::ofstream file(filename, std::ios::binary);
-    uint64_t downloaded = 0;
-
-    while (true) {
-      auto msg = WaitNextMessage(sid);
-      if (msg.header.magic == 0 || msg.header.status != 200) {
-        std::cout << "\n[Stream #" << sid << " ERR] Download interrupted." << std::endl;
-        break;
-      }
-
-      if (!msg.binary_payload.empty()) {
-        file.write(msg.binary_payload.data(), msg.binary_payload.size());
-        downloaded += msg.binary_payload.size();
-      }
-
-      if (msg.json_payload.value("eof", false))
-        break;
+    if (!file) {
+      DeleteStream(sid);
+      return;
     }
-    std::cout << "\n[Stream #" << sid << " OK] Download finished: " << filename << std::endl;
+
+    uint64_t downloaded = 0;
+    if (cb) cb(sid, 0, filesize); // 发送“已启动”信号
+
+    while (downloaded < filesize) {
+      auto msg = WaitNextMessage(sid);
+      if (msg.header.magic == 0) break;
+      
+      file.write(msg.binary_payload.data(), msg.binary_payload.size());
+      downloaded += msg.binary_payload.size();
+      
+      if (cb) cb(sid, downloaded, filesize);
+    }
+    
+    if (cb) cb(sid, filesize, filesize); // Final 100%
     DeleteStream(sid);
   }).detach();
-
-  std::cout << "[INFO] Download started in background (Stream #" << sid << ")" << std::endl;
 }
 
-void AsyCClient::Remove(const std::string &arg) {
-  if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
-    std::cout << "[ERR] Please provide a valid numeric File ID. Use 'ls' to see IDs." << std::endl;
-    return;
-  }
-
-  int file_id = std::stoi(arg);
+void AsyCClient::Remove(int file_id, std::function<void(bool success, std::string message)> cb) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
-  if (!SendPacket(Protocol::Command::Remove, sid, {{"file_id", file_id}})) {
-    DeleteStream(sid);
-    return;
-  }
+  
+  std::thread([this, file_id, sid, cb]() {
+    if (!SendPacket(Protocol::Command::Remove, sid, {{"file_id", file_id}})) {
+      if (cb) cb(false, "Failed to send request");
+      DeleteStream(sid);
+      return;
+    }
 
-  auto msg = WaitNextMessage(sid);
-  if (msg.header.magic != 0 && msg.header.status == 200) {
-    std::cout << "[OK] File deleted." << std::endl;
-  } else {
-    std::cout << "[ERR] Delete failed." << std::endl;
-  }
-  DeleteStream(sid);
+    auto msg = WaitNextMessage(sid);
+    if (msg.header.magic != 0 && msg.header.status == 200) {
+      if (cb) cb(true, "Deleted successfully");
+    } else {
+      std::string err = msg.json_payload.value("msg", "Unknown error");
+      if (cb) cb(false, err);
+    }
+    DeleteStream(sid);
+  }).detach();
 }

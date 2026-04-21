@@ -30,11 +30,14 @@ public:
   bool Connect();
   void Close();
 
-  void Login(const std::string &user, const std::string &pass);
-  void List();
-  void Upload(const std::string &local_path);
-  void Download(const std::string &arg);
-  void Remove(const std::string &arg);
+  bool Login(const std::string &user, const std::string &pass);
+  json List();
+  void Upload(const std::string &local_path, 
+              std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
+  void Download(int file_id, 
+                std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
+  void Remove(int file_id, 
+              std::function<void(bool success, std::string message)> cb = nullptr);
 
 private:
   void ShowProgressBar(uint64_t current, uint64_t total);
