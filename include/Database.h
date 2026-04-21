@@ -24,6 +24,7 @@ public:
     bool RegisterUser(const std::string& username, const std::string& password);
     nlohmann::json ListFiles(int user_id, int parent_id);
     nlohmann::json GetFile(int user_id, int parent_id, const std::string& filename);
+    nlohmann::json GetFileById(int user_id, int file_id);
     bool AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path);
     bool DeleteFile(int owner_id, int parent_id, const std::string& filename);
 

@@ -4,3 +4,9 @@ build/
 logs/
 data/
 AsyCClient_CLI/test_upload.txt
+AsyCClient_CLI/_deps/
+AsyCClient_CLI/build/
+AsyCClient_CLI/CMakeFiles/
+AsyCClient_CLI/cmake_install.cmake
+AsyCClient_CLI/CMakeCache.txt
+AsyCClient_CLI/Makefile

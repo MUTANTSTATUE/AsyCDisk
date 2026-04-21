@@ -289,11 +289,22 @@ void Session::HandleRemove(const Protocol::Message &req) {
   }
 
   std::string filename = req.json_payload.value("filename", "");
+  int file_id = req.json_payload.value("file_id", -1);
   int parent_id = req.json_payload.value("parent_id", 0);
 
+  if (file_id != -1) {
+    auto file_info = Database::GetInstance().GetFileById(user_id_, file_id);
+    if (file_info.empty()) {
+      SendResponse(Protocol::Command::Remove, 404,
+                   {{"msg", "file id not found"}}, {});
+      return;
+    }
+    filename = file_info["filename"];
+  }
+
   if (filename.empty()) {
-    SendResponse(Protocol::Command::Remove, 400, {{"msg", "missing filename"}},
-                 {});
+    SendResponse(Protocol::Command::Remove, 400,
+                 {{"msg", "missing filename or id"}}, {});
     return;
   }
 
@@ -411,14 +422,15 @@ void Session::HandleUploadData(const Protocol::Message &req) {
 
   if (req.header.binary_len == 0) {
     // EOF or empty chunk
-    LOG_INFO("Upload finished signal received. Pending writes: {}", pending_fs_reqs_);
+    LOG_INFO("Upload finished signal received. Pending writes: {}",
+             pending_fs_reqs_);
     closing_pending_ = true;
-    
+
     if (pending_fs_reqs_ == 0) {
-        uv_fs_t *close_req = new uv_fs_t();
-        close_req->data = new std::shared_ptr<Session>(shared_from_this());
-        uv_fs_close(socket_.loop, close_req, file_handle_, Session::OnFileClose);
-        closing_pending_ = false;
+      uv_fs_t *close_req = new uv_fs_t();
+      close_req->data = new std::shared_ptr<Session>(shared_from_this());
+      uv_fs_close(socket_.loop, close_req, file_handle_, Session::OnFileClose);
+      closing_pending_ = false;
     }
     return;
   }
@@ -452,16 +464,17 @@ void Session::HandleUploadData(const Protocol::Message &req) {
         if (req->result < 0) {
           LOG_ERROR("uv_fs_write error: {}", uv_strerror(req->result));
         }
-        
+
         session->pending_fs_reqs_--;
-        
+
         // If we were waiting for the last write to finish to close the file
         if (session->closing_pending_ && session->pending_fs_reqs_ == 0) {
-            LOG_INFO("Last pending write finished. Closing file now.");
-            uv_fs_t *close_req = new uv_fs_t();
-            close_req->data = new std::shared_ptr<Session>(session);
-            uv_fs_close(session->socket_.loop, close_req, session->file_handle_, Session::OnFileClose);
-            session->closing_pending_ = false;
+          LOG_INFO("Last pending write finished. Closing file now.");
+          uv_fs_t *close_req = new uv_fs_t();
+          close_req->data = new std::shared_ptr<Session>(session);
+          uv_fs_close(session->socket_.loop, close_req, session->file_handle_,
+                      Session::OnFileClose);
+          session->closing_pending_ = false;
         }
 
         uv_fs_req_cleanup(req);
@@ -484,13 +497,26 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   }
 
   std::string filename = req.json_payload.value("filename", "");
+  int file_id = req.json_payload.value("file_id", -1);
   uint64_t offset = req.json_payload.value("offset", 0);
+
+  if (file_id != -1) {
+    auto file_info = Database::GetInstance().GetFileById(user_id_, file_id);
+    if (file_info.empty()) {
+      SendResponse(Protocol::Command::DownloadData, 404,
+                   {{"msg", "file id not found"}}, {});
+      return;
+    }
+    filename = file_info["filename"];
+  }
+
   if (filename.empty()) {
     SendResponse(Protocol::Command::DownloadData, 400,
-                 {{"msg", "missing filename"}}, {});
+                 {{"msg", "missing filename or id"}}, {});
     return;
   }
 
+  current_filename_ = filename;
   std::string full_path = "data/" + std::to_string(user_id_) + "/" + filename;
   file_offset_ = offset;
   is_uploading_ = false;
@@ -505,19 +531,23 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
         auto session = *session_ptr;
         if (req->result >= 0) {
           session->file_handle_ = req->result;
-          
+
           // Get file size before starting download
           uv_fs_t stat_req;
           uint64_t total_size = 0;
-          if (uv_fs_fstat(session->socket_.loop, &stat_req, session->file_handle_, nullptr) == 0) {
+          if (uv_fs_fstat(session->socket_.loop, &stat_req,
+                          session->file_handle_, nullptr) == 0) {
             total_size = stat_req.statbuf.st_size;
             session->SendResponse(Protocol::Command::DownloadData, 200,
-                                 {{"total_size", total_size}, {"msg", "start"}}, {});
+                                  {{"total_size", total_size},
+                                   {"filename", session->current_filename_},
+                                   {"msg", "start"}},
+                                  {});
           }
           uv_fs_req_cleanup(&stat_req);
 
-          LOG_INFO("File opened for reading: {}, size: {}, offset: {}", req->path,
-                   total_size, session->file_offset_);
+          LOG_INFO("File opened for reading: {}, size: {}, offset: {}",
+                   req->path, total_size, session->file_offset_);
 
           // Trigger first read
           uv_buf_t buf = uv_buf_init(session->file_read_buf_,

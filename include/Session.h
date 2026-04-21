@@ -53,12 +53,12 @@ private:
   int user_id_ = -1;
 
   // File IO
+  std::string current_filename_;
   uint32_t pending_fs_reqs_ = 0;
   bool closing_pending_ = false;
   uv_file file_handle_ = -1;
   uint64_t file_offset_ = 0;
   uint64_t total_filesize_ = 0;
-  std::string current_filename_;
   bool is_uploading_ = false;
   uv_fs_t fs_req_; // Reuse for sequential FS ops in this session
 

@@ -165,12 +165,52 @@ nlohmann::json Database::ListFiles(int user_id, int parent_id) {
 }
 
 nlohmann::json Database::GetFile(int user_id, int parent_id, const std::string& filename) {
-    std::string sql = "SELECT id, filename, filesize, is_dir, created_at FROM files WHERE owner_id = " + 
-                      std::to_string(user_id) + " AND parent_id = " + std::to_string(parent_id) + 
-                      " AND filename = '" + filename + "';";
-    auto res = Query(sql);
-    if (res.empty()) return nlohmann::json();
-    return res[0];
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "SELECT id, owner_id, parent_id, filename, filesize, is_dir, file_path, created_at FROM files WHERE owner_id = ? AND parent_id = ? AND filename = ?;";
+    
+    nlohmann::json result = nlohmann::json::object();
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return result;
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_int(stmt, 2, parent_id);
+    sqlite3_bind_text(stmt, 3, filename.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        for (int i = 0; i < sqlite3_column_count(stmt); i++) {
+            const char* colName = sqlite3_column_name(stmt, i);
+            int colType = sqlite3_column_type(stmt, i);
+            if (colType == SQLITE_INTEGER) result[colName] = sqlite3_column_int64(stmt, i);
+            else if (colType == SQLITE_TEXT) result[colName] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+nlohmann::json Database::GetFileById(int user_id, int file_id) {
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "SELECT id, owner_id, parent_id, filename, filesize, is_dir, file_path, created_at FROM files WHERE owner_id = ? AND id = ?;";
+    
+    nlohmann::json result = nlohmann::json::object();
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return result;
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_int(stmt, 2, file_id);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        for (int i = 0; i < sqlite3_column_count(stmt); i++) {
+            const char* colName = sqlite3_column_name(stmt, i);
+            int colType = sqlite3_column_type(stmt, i);
+            if (colType == SQLITE_INTEGER) result[colName] = sqlite3_column_int64(stmt, i);
+            else if (colType == SQLITE_TEXT) result[colName] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 bool Database::AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path) {
