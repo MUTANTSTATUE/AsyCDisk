@@ -14,6 +14,22 @@ class AsyCClient {
 public:
     AsyCClient(const std::string& ip, uint16_t port) : ip_(ip), port_(port) {}
 
+    void ShowProgressBar(uint64_t current, uint64_t total) {
+        const int barWidth = 40;
+        float progress = (total > 0) ? (float)current / total : 0;
+        if (progress > 1.0) progress = 1.0;
+
+        std::cout << "\r[";
+        int pos = barWidth * progress;
+        for (int i = 0; i < barWidth; ++i) {
+            if (i < pos) std::cout << "#";
+            else std::cout << "-";
+        }
+        std::cout << "] " << int(progress * 100.0) << "% (" 
+                  << current / 1024 << " / " << total / 1024 << " KB) " << std::flush;
+        if (current >= total) std::cout << std::endl;
+    }
+
     bool Connect() {
         sock_ = socket(AF_INET, SOCK_STREAM, 0);
         if (sock_ < 0) return false;
@@ -117,6 +133,9 @@ public:
         std::cout << "[INFO] Resuming upload from offset: " << offset << std::endl;
         file.seekg(offset);
 
+        uint64_t uploaded = offset;
+        ShowProgressBar(uploaded, filesize);
+
         char buf[65536];
         while (!file.eof()) {
             file.read(buf, sizeof(buf));
@@ -124,6 +143,8 @@ public:
             if (read > 0) {
                 std::vector<char> chunk(buf, buf + read);
                 if (!SendPacket(Protocol::Command::UploadData, {}, chunk)) break;
+                uploaded += read;
+                ShowProgressBar(uploaded, filesize);
             }
         }
         // Send completion signal (empty binary)
@@ -136,13 +157,28 @@ public:
     void Download(const std::string& filename) {
         if (!SendPacket(Protocol::Command::DownloadReq, {{"filename", filename}, {"offset", 0}})) return;
         
+        Protocol::Header h_init; json j_init; std::vector<char> b_init;
+        if (!RecvPacket(h_init, j_init, b_init) || h_init.status != 200) {
+            std::cout << "[ERR] Download rejected." << std::endl;
+            return;
+        }
+        uint64_t total_size = j_init.value("total_size", 0);
+        std::cout << "[INFO] Starting download, size: " << total_size << " bytes" << std::endl;
+
         std::ofstream file(filename, std::ios::binary);
+        uint64_t downloaded = 0;
+        ShowProgressBar(downloaded, total_size);
+
         while (true) {
             Protocol::Header h; json j; std::vector<char> b;
             if (!RecvPacket(h, j, b)) break;
             if (h.status != 200) { std::cout << "[ERR] Download error." << std::endl; break; }
             
-            if (b.size() > 0) file.write(b.data(), b.size());
+            if (b.size() > 0) {
+                file.write(b.data(), b.size());
+                downloaded += b.size();
+                ShowProgressBar(downloaded, total_size);
+            }
             if (j.value("eof", false)) break;
         }
         std::cout << "[OK] Download finished: " << filename << std::endl;
@@ -171,27 +207,48 @@ int main() {
         return 1;
     }
 
-    std::string cmd;
+    std::string line;
     std::cout << "AsyCDisk CLI Client. Type 'help' for commands." << std::endl;
     while (true) {
-        std::cout << "asyc> ";
-        std::cin >> cmd;
+        std::cout << "asyc> " << std::flush;
+        if (!std::getline(std::cin, line)) break;
+        if (line.empty()) continue;
+
+        std::stringstream ss(line);
+        std::string cmd;
+        ss >> cmd;
+
         if (cmd == "exit") break;
         else if (cmd == "help") {
             std::cout << "Commands: login <user> <pass>, ls, put <path>, get <file>, rm <file>, exit" << std::endl;
         } else if (cmd == "login") {
-            std::string u, p; std::cin >> u >> p;
+            std::string u, p;
+            ss >> u >> p;
             client.Login(u, p);
         } else if (cmd == "ls") {
             client.List();
         } else if (cmd == "put") {
-            std::string path; std::cin >> path;
+            // Get the rest of the line as path
+            std::string path;
+            std::getline(ss >> std::ws, path);
+            // Handle quotes if present
+            if (path.size() >= 2 && ((path.front() == '"' && path.back() == '"') || (path.front() == '\'' && path.back() == '\''))) {
+                path = path.substr(1, path.size() - 2);
+            }
             client.Upload(path);
         } else if (cmd == "get") {
-            std::string file; std::cin >> file;
+            std::string file;
+            std::getline(ss >> std::ws, file);
+            if (file.size() >= 2 && ((file.front() == '"' && file.back() == '"') || (file.front() == '\'' && file.back() == '\''))) {
+                file = file.substr(1, file.size() - 2);
+            }
             client.Download(file);
         } else if (cmd == "rm") {
-            std::string file; std::cin >> file;
+            std::string file;
+            std::getline(ss >> std::ws, file);
+            if (file.size() >= 2 && ((file.front() == '"' && file.back() == '"') || (file.front() == '\'' && file.back() == '\''))) {
+                file = file.substr(1, file.size() - 2);
+            }
             client.Remove(file);
         }
     }

@@ -505,8 +505,19 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
         auto session = *session_ptr;
         if (req->result >= 0) {
           session->file_handle_ = req->result;
-          LOG_INFO("File opened for reading: {}, fd: {}, offset: {}", req->path,
-                   session->file_handle_, session->file_offset_);
+          
+          // Get file size before starting download
+          uv_fs_t stat_req;
+          uint64_t total_size = 0;
+          if (uv_fs_fstat(session->socket_.loop, &stat_req, session->file_handle_, nullptr) == 0) {
+            total_size = stat_req.statbuf.st_size;
+            session->SendResponse(Protocol::Command::DownloadData, 200,
+                                 {{"total_size", total_size}, {"msg", "start"}}, {});
+          }
+          uv_fs_req_cleanup(&stat_req);
+
+          LOG_INFO("File opened for reading: {}, size: {}, offset: {}", req->path,
+                   total_size, session->file_offset_);
 
           // Trigger first read
           uv_buf_t buf = uv_buf_init(session->file_read_buf_,
