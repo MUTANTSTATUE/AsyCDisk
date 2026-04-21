@@ -288,25 +288,23 @@ void Session::HandleRemove(const Protocol::Message &req) {
     return;
   }
 
-  std::string filename = req.json_payload.value("filename", "");
   int file_id = req.json_payload.value("file_id", -1);
   int parent_id = req.json_payload.value("parent_id", 0);
 
-  if (file_id != -1) {
-    auto file_info = Database::GetInstance().GetFileById(user_id_, file_id);
-    if (file_info.empty()) {
-      SendResponse(Protocol::Command::Remove, 404,
-                   {{"msg", "file id not found"}}, {});
-      return;
-    }
-    filename = file_info["filename"];
-  }
-
-  if (filename.empty()) {
-    SendResponse(Protocol::Command::Remove, 400,
-                 {{"msg", "missing filename or id"}}, {});
+  if (file_id == -1) {
+    SendResponse(Protocol::Command::Remove, 400, {{"msg", "missing file_id"}},
+                 {});
     return;
   }
+
+  auto file_info = Database::GetInstance().GetFileById(user_id_, file_id);
+  if (file_info.empty()) {
+    SendResponse(Protocol::Command::Remove, 404, {{"msg", "file id not found"}},
+                 {});
+    return;
+  }
+
+  std::string filename = file_info["filename"];
 
   // 1. Delete from database
   if (!Database::GetInstance().DeleteFile(user_id_, parent_id, filename)) {
@@ -496,25 +494,23 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
     return;
   }
 
-  std::string filename = req.json_payload.value("filename", "");
   int file_id = req.json_payload.value("file_id", -1);
   uint64_t offset = req.json_payload.value("offset", 0);
 
-  if (file_id != -1) {
-    auto file_info = Database::GetInstance().GetFileById(user_id_, file_id);
-    if (file_info.empty()) {
-      SendResponse(Protocol::Command::DownloadData, 404,
-                   {{"msg", "file id not found"}}, {});
-      return;
-    }
-    filename = file_info["filename"];
-  }
-
-  if (filename.empty()) {
+  if (file_id == -1) {
     SendResponse(Protocol::Command::DownloadData, 400,
-                 {{"msg", "missing filename or id"}}, {});
+                 {{"msg", "missing file_id"}}, {});
     return;
   }
+
+  auto file_info = Database::GetInstance().GetFileById(user_id_, file_id);
+  if (file_info.empty()) {
+    SendResponse(Protocol::Command::DownloadData, 404,
+                 {{"msg", "file id not found"}}, {});
+    return;
+  }
+
+  std::string filename = file_info["filename"];
 
   current_filename_ = filename;
   std::string full_path = "data/" + std::to_string(user_id_) + "/" + filename;

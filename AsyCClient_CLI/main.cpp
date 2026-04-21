@@ -206,14 +206,16 @@ public:
   }
 
   void Download(const std::string &arg) {
-    json j_req;
-    if (!arg.empty() && std::all_of(arg.begin(), arg.end(), ::isdigit)) {
-      j_req = {{"file_id", std::stoi(arg)}, {"offset", 0}};
-    } else {
-      j_req = {{"filename", arg}, {"offset", 0}};
+    if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
+      std::cout << "[ERR] Please provide a valid numeric File ID. Use 'ls' to "
+                   "see IDs."
+                << std::endl;
+      return;
     }
 
-    if (!SendPacket(Protocol::Command::DownloadReq, j_req))
+    int file_id = std::stoi(arg);
+    if (!SendPacket(Protocol::Command::DownloadReq,
+                    {{"file_id", file_id}, {"offset", 0}}))
       return;
 
     Protocol::Header h_init;
@@ -255,14 +257,15 @@ public:
   }
 
   void Remove(const std::string &arg) {
-    json j_req;
-    if (!arg.empty() && std::all_of(arg.begin(), arg.end(), ::isdigit)) {
-      j_req = {{"file_id", std::stoi(arg)}};
-    } else {
-      j_req = {{"filename", arg}};
+    if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
+      std::cout << "[ERR] Please provide a valid numeric File ID. Use 'ls' to "
+                   "see IDs."
+                << std::endl;
+      return;
     }
 
-    if (!SendPacket(Protocol::Command::Remove, j_req))
+    int file_id = std::stoi(arg);
+    if (!SendPacket(Protocol::Command::Remove, {{"file_id", file_id}}))
       return;
     Protocol::Header h;
     json j;
