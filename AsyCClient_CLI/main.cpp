@@ -2,15 +2,28 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
+#include <condition_variable>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
+#include <mutex>
+#include <queue>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
+#include <atomic>
 
 using json = nlohmann::json;
+
+struct StreamContext {
+  std::queue<Protocol::Message> messages;
+  std::mutex mtx;
+  std::condition_variable cv;
+  bool closed = false;
+};
 
 class AsyCClient {
 public:
@@ -62,15 +75,35 @@ public:
     if (connect(sock_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
       return false;
     }
+
+    running_ = true;
+    receiver_thread_ = std::thread(&AsyCClient::ReceiverLoop, this);
     return true;
   }
 
   void Close() {
-    if (sock_ >= 0)
+    running_ = false;
+    if (sock_ >= 0) {
+      shutdown(sock_, SHUT_RDWR);
       close(sock_);
+    }
+    if (receiver_thread_.joinable()) {
+      receiver_thread_.join();
+    }
   }
 
-  bool SendPacket(Protocol::Command cmd, const json &j_payload,
+  void CreateStream(uint32_t sid) {
+    std::lock_guard<std::mutex> lock(streams_mutex_);
+    streams_[sid] = std::make_shared<StreamContext>();
+  }
+
+  void DeleteStream(uint32_t sid) {
+    std::lock_guard<std::mutex> lock(streams_mutex_);
+    streams_.erase(sid);
+  }
+
+  bool SendPacket(Protocol::Command cmd, uint32_t stream_id,
+                  const json &j_payload,
                   const std::vector<char> &b_payload = {}) {
     std::string j_str;
     if (!j_payload.is_null() && !j_payload.empty()) {
@@ -82,10 +115,11 @@ public:
     header.version = Protocol::CURRENT_VERSION;
     header.command = static_cast<uint16_t>(cmd);
     header.status = 0;
-    header.stream_id = current_stream_id_;
+    header.stream_id = stream_id;
     header.json_len = j_str.size();
     header.binary_len = b_payload.size();
 
+    std::lock_guard<std::mutex> lock(send_mutex_);
     if (send(sock_, &header, sizeof(header), 0) != sizeof(header))
       return false;
     if (header.json_len > 0) {
@@ -100,172 +134,229 @@ public:
     return true;
   }
 
-  bool RecvPacket(Protocol::Header &header, json &j_payload,
-                  std::vector<char> &b_payload) {
-    if (recv(sock_, &header, sizeof(header), MSG_WAITALL) != sizeof(header))
+  bool RecvPacket(Protocol::Message &msg) {
+    if (recv(sock_, &msg.header, sizeof(msg.header), MSG_WAITALL) !=
+        sizeof(msg.header))
       return false;
-    if (header.magic != Protocol::MAGIC_NUMBER)
+    if (msg.header.magic != Protocol::MAGIC_NUMBER)
       return false;
 
-    // Check if the packet is for our current stream (for now we only have one)
-    // In the future, this will be handled by a message dispatcher.
-    
-    if (header.json_len > 0) {
-      std::string j_str(header.json_len, 0);
-      recv(sock_, &j_str[0], header.json_len, MSG_WAITALL);
-      j_payload = json::parse(j_str);
+    if (msg.header.json_len > 0) {
+      std::string j_str(msg.header.json_len, 0);
+      recv(sock_, &j_str[0], msg.header.json_len, MSG_WAITALL);
+      msg.json_payload = json::parse(j_str);
     }
-    if (header.binary_len > 0) {
-      b_payload.resize(header.binary_len);
-      recv(sock_, &b_payload[0], header.binary_len, MSG_WAITALL);
+    if (msg.header.binary_len > 0) {
+      msg.binary_payload.resize(msg.header.binary_len);
+      recv(sock_, &msg.binary_payload[0], msg.header.binary_len, MSG_WAITALL);
     }
     return true;
   }
 
-  void Login(const std::string &user, const std::string &pass) {
-    current_stream_id_++;
-    if (!SendPacket(Protocol::Command::Login,
-                    {{"username", user}, {"password", pass}}))
-      return;
-    Protocol::Header h;
-    json j;
-    std::vector<char> b;
-    if (RecvPacket(h, j, b) && h.status == 200) {
-      std::cout << "[OK] Login successful. UserID: " << j["user_id"]
-                << std::endl;
-    } else {
-      std::cout << "[ERR] Login failed: " << j.value("msg", "unknown error")
-                << std::endl;
+  void ReceiverLoop() {
+    while (running_) {
+      Protocol::Message msg;
+      if (!RecvPacket(msg)) {
+        if (running_) {
+          std::cout << "\n[ERR] Connection lost." << std::endl;
+          running_ = false;
+        }
+        break;
+      }
+
+      std::lock_guard<std::mutex> lock(streams_mutex_);
+      auto it = streams_.find(msg.header.stream_id);
+      if (it != streams_.end()) {
+        std::lock_guard<std::mutex> q_lock(it->second->mtx);
+        it->second->messages.push(std::move(msg));
+        it->second->cv.notify_one();
+      }
     }
   }
 
-  void List() {
-    current_stream_id_++;
-    if (!SendPacket(Protocol::Command::ListDir, {{"parent_id", 0}}))
+  Protocol::Message WaitNextMessage(uint32_t stream_id) {
+    std::shared_ptr<StreamContext> ctx;
+    {
+      std::lock_guard<std::mutex> lock(streams_mutex_);
+      ctx = streams_[stream_id];
+    }
+
+    std::unique_lock<std::mutex> q_lock(ctx->mtx);
+    ctx->cv.wait(q_lock, [&] { return !ctx->messages.empty() || ctx->closed; });
+
+    if (ctx->messages.empty())
+      return {}; // Stream closed
+
+    Protocol::Message msg = std::move(ctx->messages.front());
+    ctx->messages.pop();
+    return msg;
+  }
+
+  void Login(const std::string &user, const std::string &pass) {
+    uint32_t sid = next_stream_id_++;
+    CreateStream(sid);
+    if (!SendPacket(Protocol::Command::Login, sid,
+                    {{"username", user}, {"password", pass}})) {
+      DeleteStream(sid);
       return;
-    Protocol::Header h;
-    json j;
-    std::vector<char> b;
-    if (RecvPacket(h, j, b) && h.status == 200) {
+    }
+    
+    auto msg = WaitNextMessage(sid);
+    if (msg.header.magic != 0 && msg.header.status == 200) {
+      std::cout << "[OK] Login successful. UserID: " << msg.json_payload["user_id"]
+                << std::endl;
+    } else {
+      std::cout << "[ERR] Login failed: " << msg.json_payload.value("msg", "unknown error")
+                << std::endl;
+    }
+    DeleteStream(sid);
+  }
+
+  void List() {
+    uint32_t sid = next_stream_id_++;
+    CreateStream(sid);
+    if (!SendPacket(Protocol::Command::ListDir, sid, {{"parent_id", 0}})) {
+      DeleteStream(sid);
+      return;
+    }
+
+    auto msg = WaitNextMessage(sid);
+    if (msg.header.magic != 0 && msg.header.status == 200) {
       std::cout << std::left << std::setw(8) << "ID" << std::setw(42)
                 << "Filename" << std::setw(15) << "Size"
                 << "Created At" << std::endl;
       std::cout << std::string(85, '-') << std::endl;
-      for (auto &f : j["files"]) {
+      for (auto &f : msg.json_payload["files"]) {
         std::cout << std::left << std::setw(8) << f["id"].get<int>()
                   << std::setw(42) << f["filename"].get<std::string>()
                   << std::setw(15) << FormatSize(f["filesize"].get<uint64_t>())
                   << f["created_at"].get<std::string>() << std::endl;
       }
+    } else {
+      std::cout << "[ERR] List failed." << std::endl;
     }
+    DeleteStream(sid);
   }
 
   void Upload(const std::string &local_path) {
-    current_stream_id_++;
-    std::ifstream file(local_path, std::ios::binary);
-    if (!file) {
-      std::cout << "[ERR] Cannot open local file." << std::endl;
-      return;
-    }
+    uint32_t sid = next_stream_id_++;
+    CreateStream(sid);
 
-    std::string filename =
-        local_path.substr(local_path.find_last_of("/\\") + 1);
-    file.seekg(0, std::ios::end);
-    size_t filesize = file.tellg();
-    file.seekg(0, std::ios::beg);
+    std::thread([this, local_path, sid]() {
+      std::ifstream file(local_path, std::ios::binary);
+      if (!file) {
+        std::cout << "\n[Stream #" << sid << " ERR] Cannot open local file: " << local_path << std::endl;
+        DeleteStream(sid);
+        return;
+      }
 
-    if (!SendPacket(Protocol::Command::UploadReq,
-                    {{"filename", filename}, {"filesize", filesize}}))
-      return;
-    Protocol::Header h;
-    json j;
-    std::vector<char> b;
-    if (!RecvPacket(h, j, b) || h.status != 200) {
-      std::cout << "[ERR] Upload request rejected: "
-                << j.value("msg", "unknown") << std::endl;
-      return;
-    }
+      std::string filename = local_path.substr(local_path.find_last_of("/\\") + 1);
+      file.seekg(0, std::ios::end);
+      size_t filesize = file.tellg();
+      file.seekg(0, std::ios::beg);
 
-    size_t offset = j["offset"];
-    std::cout << "[INFO] Resuming upload from offset: " << offset << std::endl;
-    file.seekg(offset);
+      std::cout << "\n[Stream #" << sid << " INFO] Starting upload: " << filename << " (" << filesize << " bytes)" << std::endl;
 
-    uint64_t uploaded = offset;
-    ShowProgressBar(uploaded, filesize);
+      if (!SendPacket(Protocol::Command::UploadReq, sid,
+                      {{"filename", filename}, {"filesize", filesize}})) {
+        DeleteStream(sid);
+        return;
+      }
 
-    char buf[65536];
-    while (!file.eof()) {
-      file.read(buf, sizeof(buf));
-      size_t read = file.gcount();
-      if (read > 0) {
+      auto msg_init = WaitNextMessage(sid);
+      if (msg_init.header.magic == 0 || msg_init.header.status != 200) {
+        std::cout << "\n[Stream #" << sid << " ERR] Upload rejected: " << msg_init.json_payload.value("msg", "unknown error") << std::endl;
+        DeleteStream(sid);
+        return;
+      }
+
+      uint64_t offset = msg_init.json_payload.value("offset", 0);
+      file.seekg(offset);
+      
+      uint64_t uploaded = offset;
+      char buf[65536];
+      while (uploaded < filesize) {
+        file.read(buf, sizeof(buf));
+        size_t read = file.gcount();
+        if (read <= 0) break;
+
         std::vector<char> chunk(buf, buf + read);
-        if (!SendPacket(Protocol::Command::UploadData, {}, chunk))
+        if (!SendPacket(Protocol::Command::UploadData, sid, {}, chunk))
           break;
         uploaded += read;
-        ShowProgressBar(uploaded, filesize);
+        // Optionally show progress every few MBs to avoid spam
       }
-    }
-    // Send completion signal (empty binary)
-    SendPacket(Protocol::Command::UploadData, {});
-    if (RecvPacket(h, j, b) && h.status == 200) {
-      std::cout << "[OK] Upload finished." << std::endl;
-    }
+
+      // Send completion signal (empty binary)
+      SendPacket(Protocol::Command::UploadData, sid, {}, {});
+      
+      auto msg_done = WaitNextMessage(sid);
+      if (msg_done.header.status == 200) {
+        std::cout << "\n[Stream #" << sid << " OK] Upload finished: " << filename << std::endl;
+      } else {
+        std::cout << "\n[Stream #" << sid << " ERR] Upload error at finalization." << std::endl;
+      }
+
+      DeleteStream(sid);
+    }).detach();
+
+    std::cout << "[INFO] Upload started in background (Stream #" << sid << ")" << std::endl;
   }
 
   void Download(const std::string &arg) {
-    current_stream_id_++;
+    uint32_t sid = next_stream_id_++;
     if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
-      std::cout << "[ERR] Please provide a valid numeric File ID. Use 'ls' to "
-                   "see IDs."
-                << std::endl;
+      std::cout << "[ERR] Please provide a valid numeric File ID." << std::endl;
       return;
     }
 
     int file_id = std::stoi(arg);
-    if (!SendPacket(Protocol::Command::DownloadReq,
-                    {{"file_id", file_id}, {"offset", 0}}))
-      return;
+    CreateStream(sid);
 
-    Protocol::Header h_init;
-    json j_init;
-    std::vector<char> b_init;
-    if (!RecvPacket(h_init, j_init, b_init) || h_init.status != 200) {
-      std::cout << "[ERR] Download rejected." << std::endl;
-      return;
-    }
-    uint64_t total_size = j_init.value("total_size", 0);
-    std::string filename = j_init.value("filename", "downloaded_file");
-    std::cout << "[INFO] Starting download: " << filename << " (" << total_size
-              << " bytes)" << std::endl;
-
-    std::ofstream file(filename, std::ios::binary);
-    uint64_t downloaded = 0;
-    ShowProgressBar(downloaded, total_size);
-
-    while (true) {
-      Protocol::Header h;
-      json j;
-      std::vector<char> b;
-      if (!RecvPacket(h, j, b))
-        break;
-      if (h.status != 200) {
-        std::cout << "[ERR] Download error." << std::endl;
-        break;
+    std::thread([this, file_id, sid]() {
+      if (!SendPacket(Protocol::Command::DownloadReq, sid,
+                      {{"file_id", file_id}, {"offset", 0}})) {
+        DeleteStream(sid);
+        return;
       }
 
-      if (b.size() > 0) {
-        file.write(b.data(), b.size());
-        downloaded += b.size();
-        ShowProgressBar(downloaded, total_size);
+      auto msg_init = WaitNextMessage(sid);
+      if (msg_init.header.magic == 0 || msg_init.header.status != 200) {
+        std::cout << "\n[Stream #" << sid << " ERR] Download rejected by server." << std::endl;
+        DeleteStream(sid);
+        return;
       }
-      if (j.value("eof", false))
-        break;
-    }
-    std::cout << "[OK] Download finished: " << filename << std::endl;
+
+      uint64_t total_size = msg_init.json_payload.value("total_size", 0);
+      std::string filename = msg_init.json_payload.value("filename", "downloaded_file");
+      std::cout << "\n[Stream #" << sid << " INFO] Starting download: " << filename << " (" << total_size << " bytes)" << std::endl;
+
+      std::ofstream file(filename, std::ios::binary);
+      uint64_t downloaded = 0;
+
+      while (true) {
+        auto msg = WaitNextMessage(sid);
+        if (msg.header.magic == 0 || msg.header.status != 200) {
+          std::cout << "\n[Stream #" << sid << " ERR] Download interrupted." << std::endl;
+          break;
+        }
+
+        if (!msg.binary_payload.empty()) {
+          file.write(msg.binary_payload.data(), msg.binary_payload.size());
+          downloaded += msg.binary_payload.size();
+        }
+
+        if (msg.json_payload.value("eof", false))
+          break;
+      }
+      std::cout << "\n[Stream #" << sid << " OK] Download finished: " << filename << std::endl;
+      DeleteStream(sid);
+    }).detach();
+
+    std::cout << "[INFO] Download started in background (Stream #" << sid << ")" << std::endl;
   }
 
   void Remove(const std::string &arg) {
-    current_stream_id_++;
     if (arg.empty() || !std::all_of(arg.begin(), arg.end(), ::isdigit)) {
       std::cout << "[ERR] Please provide a valid numeric File ID. Use 'ls' to "
                    "see IDs."
@@ -274,23 +365,34 @@ public:
     }
 
     int file_id = std::stoi(arg);
-    if (!SendPacket(Protocol::Command::Remove, {{"file_id", file_id}}))
+    uint32_t sid = next_stream_id_++;
+    CreateStream(sid);
+    if (!SendPacket(Protocol::Command::Remove, sid, {{"file_id", file_id}})) {
+      DeleteStream(sid);
       return;
-    Protocol::Header h;
-    json j;
-    std::vector<char> b;
-    if (RecvPacket(h, j, b) && h.status == 200) {
+    }
+
+    auto msg = WaitNextMessage(sid);
+    if (msg.header.magic != 0 && msg.header.status == 200) {
       std::cout << "[OK] File deleted." << std::endl;
     } else {
       std::cout << "[ERR] Delete failed." << std::endl;
     }
+    DeleteStream(sid);
   }
 
 private:
   std::string ip_;
   uint16_t port_;
   int sock_ = -1;
-  uint32_t current_stream_id_ = 1;
+  std::atomic<uint32_t> next_stream_id_{1};
+  
+  std::atomic<bool> running_{false};
+  std::thread receiver_thread_;
+  std::mutex send_mutex_;
+  
+  std::map<uint32_t, std::shared_ptr<StreamContext>> streams_;
+  std::mutex streams_mutex_;
 };
 
 int main() {
