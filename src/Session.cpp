@@ -411,10 +411,15 @@ void Session::HandleUploadData(const Protocol::Message &req) {
 
   if (req.header.binary_len == 0) {
     // EOF or empty chunk
-    LOG_INFO("Upload finished for session.");
-    uv_fs_t *close_req = new uv_fs_t();
-    close_req->data = new std::shared_ptr<Session>(shared_from_this());
-    uv_fs_close(socket_.loop, close_req, file_handle_, Session::OnFileClose);
+    LOG_INFO("Upload finished signal received. Pending writes: {}", pending_fs_reqs_);
+    closing_pending_ = true;
+    
+    if (pending_fs_reqs_ == 0) {
+        uv_fs_t *close_req = new uv_fs_t();
+        close_req->data = new std::shared_ptr<Session>(shared_from_this());
+        uv_fs_close(socket_.loop, close_req, file_handle_, Session::OnFileClose);
+        closing_pending_ = false;
+    }
     return;
   }
 
@@ -432,18 +437,36 @@ void Session::HandleUploadData(const Protocol::Message &req) {
   uv_fs_t *write_req = new uv_fs_t();
   write_req->data = ctx;
 
+  // Crucial: Update offset BEFORE starting the async operation to avoid race
+  // condition.
+  uint64_t current_write_at = file_offset_;
+  file_offset_ += req.header.binary_len;
+  pending_fs_reqs_++;
+
   int r = uv_fs_write(
-      socket_.loop, write_req, file_handle_, &ctx->buf, 1, file_offset_,
+      socket_.loop, write_req, file_handle_, &ctx->buf, 1, current_write_at,
       [](uv_fs_t *req) {
         WriteCtx *ctx = static_cast<WriteCtx *>(req->data);
+        auto session = ctx->session;
+
         if (req->result < 0) {
           LOG_ERROR("uv_fs_write error: {}", uv_strerror(req->result));
-        } else {
-          ctx->session->file_offset_ += req->result;
         }
+        
+        session->pending_fs_reqs_--;
+        
+        // If we were waiting for the last write to finish to close the file
+        if (session->closing_pending_ && session->pending_fs_reqs_ == 0) {
+            LOG_INFO("Last pending write finished. Closing file now.");
+            uv_fs_t *close_req = new uv_fs_t();
+            close_req->data = new std::shared_ptr<Session>(session);
+            uv_fs_close(session->socket_.loop, close_req, session->file_handle_, Session::OnFileClose);
+            session->closing_pending_ = false;
+        }
+
         uv_fs_req_cleanup(req);
         delete req;
-        delete ctx; // shared_ptr inside ctx will be released here
+        delete ctx;
       });
 
   if (r < 0) {

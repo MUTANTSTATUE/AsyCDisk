@@ -53,6 +53,8 @@ private:
   int user_id_ = -1;
 
   // File IO
+  uint32_t pending_fs_reqs_ = 0;
+  bool closing_pending_ = false;
   uv_file file_handle_ = -1;
   uint64_t file_offset_ = 0;
   uint64_t total_filesize_ = 0;
