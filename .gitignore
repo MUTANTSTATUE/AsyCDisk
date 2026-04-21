@@ -3,3 +3,4 @@ build/
 *.md
 logs/
 data/
+AsyCClient_CLI/test_upload.txt
