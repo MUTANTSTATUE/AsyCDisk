@@ -214,14 +214,30 @@ nlohmann::json Database::GetFileById(int user_id, int file_id) {
 }
 
 bool Database::AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path) {
-    std::string sql = "INSERT OR REPLACE INTO files (owner_id, parent_id, filename, filesize, is_dir, file_path) VALUES (" +
-                      std::to_string(owner_id) + ", " + 
-                      std::to_string(parent_id) + ", '" + 
-                      filename + "', " + 
-                      std::to_string(size) + ", " + 
-                      (is_dir ? "1" : "0") + ", '" + 
-                      path + "');";
-    return Execute(sql);
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "INSERT OR REPLACE INTO files (owner_id, parent_id, filename, filesize, is_dir, file_path) VALUES (?, ?, ?, ?, ?, ?);";
+    
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("AddFile prepare failed: {}", sqlite3_errmsg(db_));
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, owner_id);
+    sqlite3_bind_int(stmt, 2, parent_id);
+    sqlite3_bind_text(stmt, 3, filename.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 4, size);
+    sqlite3_bind_int(stmt, 5, is_dir ? 1 : 0);
+    sqlite3_bind_text(stmt, 6, path.c_str(), -1, SQLITE_STATIC);
+
+    bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!success) {
+        LOG_ERROR("AddFile execution failed: {}", sqlite3_errmsg(db_));
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
 }
 
 bool Database::DeleteFile(int owner_id, int parent_id, const std::string& filename) {
