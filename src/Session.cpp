@@ -191,8 +191,7 @@ void Session::HandleMessage(const Protocol::Message &msg) {
   default:
     LOG_WARN("Unknown command ID: {}", static_cast<int>(msg.header.command));
     SendResponse(static_cast<Protocol::Command>(msg.header.command), 400,
-                 msg.header.stream_id,
-                 {{"error", "Unknown command"}}, {});
+                 msg.header.stream_id, {{"error", "Unknown command"}}, {});
     break;
   }
 }
@@ -276,20 +275,21 @@ void Session::HandleRegister(const Protocol::Message &req) {
 
 void Session::HandleListDir(const Protocol::Message &req) {
   if (user_id_ == -1) {
-    SendResponse(Protocol::Command::ListDir, 403, req.header.stream_id, {{"msg", "not logged in"}},
-                 {});
+    SendResponse(Protocol::Command::ListDir, 403, req.header.stream_id,
+                 {{"msg", "not logged in"}}, {});
     return;
   }
 
   int parent_id = req.json_payload.value("parent_id", 0);
   auto files = Database::GetInstance().ListFiles(user_id_, parent_id);
-  SendResponse(Protocol::Command::ListDir, 200, req.header.stream_id, {{"files", files}}, {});
+  SendResponse(Protocol::Command::ListDir, 200, req.header.stream_id,
+               {{"files", files}}, {});
 }
 
 void Session::HandleRemove(const Protocol::Message &req) {
   if (user_id_ == -1) {
-    SendResponse(Protocol::Command::Remove, 403, req.header.stream_id, {{"msg", "not logged in"}},
-                 {});
+    SendResponse(Protocol::Command::Remove, 403, req.header.stream_id,
+                 {{"msg", "not logged in"}}, {});
     return;
   }
 
@@ -332,8 +332,8 @@ void Session::HandleRemove(const Protocol::Message &req) {
         if (req->result < 0 && req->result != UV_ENOENT) {
           LOG_ERROR("uv_fs_unlink error: {}", uv_strerror(req->result));
           ctx->session->SendResponse(Protocol::Command::Remove, 500,
-                                     ctx->stream_id, {{"msg", "filesystem error"}},
-                                     {});
+                                     ctx->stream_id,
+                                     {{"msg", "filesystem error"}}, {});
         } else {
           LOG_INFO("File deleted: {}", req->path);
           ctx->session->SendResponse(Protocol::Command::Remove, 200,
@@ -467,8 +467,8 @@ void Session::HandleUploadData(const Protocol::Message &req) {
   task->pending_fs_reqs++;
 
   int r = uv_fs_write(
-      socket_.loop, write_req, task->file_handle, &ctx->buf, 1, current_write_at,
-      [](uv_fs_t *req) {
+      socket_.loop, write_req, task->file_handle, &ctx->buf, 1,
+      current_write_at, [](uv_fs_t *req) {
         WriteCtx *ctx = static_cast<WriteCtx *>(req->data);
         auto session = ctx->session;
         uint32_t sid = ctx->stream_id;
@@ -579,8 +579,8 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
                    req->path, total_size, sid);
 
           // Trigger first read
-          uv_buf_t buf = uv_buf_init(task->file_read_buf,
-                                     sizeof(task->file_read_buf));
+          uv_buf_t buf =
+              uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
           uv_fs_read(session->socket_.loop, req, task->file_handle, &buf, 1,
                      task->file_offset, Session::OnFileRead);
         } else {
@@ -655,9 +655,10 @@ void Session::OnFileClose(uv_fs_t *req) {
   LOG_INFO("File closed for stream {}, fd: {}", sid, task->file_handle);
 
   if (task->is_uploading && !task->current_filename.empty()) {
-    std::string path =
-        "data/" + std::to_string(session->user_id_) + "/" + task->current_filename;
-    Database::GetInstance().AddFile(session->user_id_, 0, task->current_filename,
+    std::string path = "data/" + std::to_string(session->user_id_) + "/" +
+                       task->current_filename;
+    Database::GetInstance().AddFile(session->user_id_, 0,
+                                    task->current_filename,
                                     task->total_filesize, false, path);
     LOG_INFO("File metadata synced to database for stream {}: {}", sid,
              task->current_filename);
@@ -699,7 +700,8 @@ void Session::OnFileRead(uv_fs_t *req) {
                           {{"eof", false}}, data);
 
     // Continue reading next chunk
-    uv_buf_t buf = uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
+    uv_buf_t buf =
+        uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
     uv_fs_read(session->socket_.loop, req, task->file_handle, &buf, 1,
                task->file_offset, Session::OnFileRead);
   } else if (req->result == 0) {

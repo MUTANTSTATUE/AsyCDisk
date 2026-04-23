@@ -26,8 +26,8 @@ int main() {
     if (cmd == "exit")
       break;
     else if (cmd == "help") {
-      std::cout << "Commands: login <user> <pass>, ls, put <path>, get <file>, "
-                   "rm <file>, exit"
+      std::cout << "Commands: login <user> <pass>, ls, put <path>, get <id>, "
+                   "rm <id>, exit"
                 << std::endl;
     } else if (cmd == "login") {
       std::string u, p;
@@ -52,7 +52,7 @@ int main() {
                                (file.front() == '\'' && file.back() == '\''))) {
         file = file.substr(1, file.size() - 2);
       }
-      client.Download(file);
+      client.Download(std::stoi(file));
     } else if (cmd == "rm") {
       std::string file;
       std::getline(ss >> std::ws, file);
@@ -60,7 +60,7 @@ int main() {
                                (file.front() == '\'' && file.back() == '\''))) {
         file = file.substr(1, file.size() - 2);
       }
-      client.Remove(file);
+      client.Remove(std::stoi(file));
     }
   }
 
