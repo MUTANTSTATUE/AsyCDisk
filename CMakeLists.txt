@@ -34,9 +34,10 @@ FetchContent_MakeAvailable(libuv)
 
 # 4. Find SQLite3
 find_package(SQLite3 REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Include directories
-include_directories(include)
+include_directories(include ${OPENSSL_INCLUDE_DIR})
 
 # Add main executable
 add_executable(AsyCDisk 
@@ -46,6 +47,7 @@ add_executable(AsyCDisk
     src/TcpServer.cpp
     src/Session.cpp
     src/Database.cpp
+    src/CryptoUtils.cpp
 )
 
 # Link libraries
@@ -54,5 +56,7 @@ target_link_libraries(AsyCDisk PRIVATE
     spdlog::spdlog
     nlohmann_json
     SQLite3::SQLite3
+    OpenSSL::SSL
+    OpenSSL::Crypto
     pthread
 )

@@ -189,3 +189,5 @@ def test_remove_file(client):
     # Verify gone
     resp = client.list_dir(0)
     assert len(resp['json']['files']) == 0
+
+

@@ -1,6 +1,7 @@
 #pragma once
 #include "Protocol.h"
 #include "FileTask.h"
+#include "CryptoUtils.h"
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -35,7 +36,10 @@ private:
   void HandleLogin(const Protocol::Message &req);
   void HandleRegister(const Protocol::Message &req);
   void HandleListDir(const Protocol::Message &req);
+  void HandleListAllDirs(const Protocol::Message &req);
+  void HandleMakeDir(const Protocol::Message &req);
   void HandleRemove(const Protocol::Message &req);
+  void HandleMove(const Protocol::Message &req);
   void HandleUploadReq(const Protocol::Message &req);
   void HandleUploadData(const Protocol::Message &req);
   void HandleDownloadReq(const Protocol::Message &req);
@@ -54,6 +58,7 @@ private:
   std::shared_ptr<Session> self_ref_;
   std::vector<char> recv_buf_;
   int user_id_ = -1;
+  std::vector<uint8_t> user_key_;
 
   // File IO (Multiplexed)
   std::unordered_map<uint32_t, std::shared_ptr<FileTask>> active_tasks_;

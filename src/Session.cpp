@@ -176,8 +176,17 @@ void Session::HandleMessage(const Protocol::Message &msg) {
   case Protocol::Command::ListDir:
     HandleListDir(msg);
     break;
+  case Protocol::Command::ListAllDirs:
+    HandleListAllDirs(msg);
+    break;
+  case Protocol::Command::MakeDir:
+    HandleMakeDir(msg);
+    break;
   case Protocol::Command::Remove:
     HandleRemove(msg);
+    break;
+  case Protocol::Command::Move:
+    HandleMove(msg);
     break;
   case Protocol::Command::UploadReq:
     HandleUploadReq(msg);
@@ -242,6 +251,7 @@ void Session::HandleLogin(const Protocol::Message &req) {
   LOG_INFO("User login attempt: {}", username);
 
   if (Database::GetInstance().AuthenticateUser(username, password, user_id_)) {
+    user_key_ = CryptoUtils::DeriveKey(password);
     LOG_INFO("Login success for user: {} (ID: {})", username, user_id_);
     SendResponse(Protocol::Command::Login, 200, req.header.stream_id,
                  {{"msg", "login success"}, {"user_id", user_id_}}, {});
@@ -286,6 +296,68 @@ void Session::HandleListDir(const Protocol::Message &req) {
                {{"files", files}}, {});
 }
 
+void Session::HandleListAllDirs(const Protocol::Message &req) {
+  if (user_id_ == -1) {
+    SendResponse(Protocol::Command::ListAllDirs, 403, req.header.stream_id,
+                 {{"msg", "not logged in"}}, {});
+    return;
+  }
+
+  auto dirs = Database::GetInstance().GetAllDirectories(user_id_);
+  SendResponse(Protocol::Command::ListAllDirs, 200, req.header.stream_id,
+               {{"dirs", dirs}}, {});
+}
+
+void Session::HandleMakeDir(const Protocol::Message &req) {
+  if (user_id_ == -1) {
+    SendResponse(Protocol::Command::MakeDir, 403, req.header.stream_id,
+                 {{"msg", "not logged in"}}, {});
+    return;
+  }
+
+  std::string dirname = req.json_payload.value("dirname", "");
+  int parent_id = req.json_payload.value("parent_id", 0);
+
+  if (dirname.empty()) {
+    SendResponse(Protocol::Command::MakeDir, 400, req.header.stream_id,
+                 {{"msg", "missing dirname"}}, {});
+    return;
+  }
+
+  if (Database::GetInstance().AddFile(user_id_, parent_id, dirname, 0, true, "")) {
+    SendResponse(Protocol::Command::MakeDir, 200, req.header.stream_id,
+                 {{"msg", "success"}}, {});
+  } else {
+    SendResponse(Protocol::Command::MakeDir, 500, req.header.stream_id,
+                 {{"msg", "db error"}}, {});
+  }
+}
+
+void Session::HandleMove(const Protocol::Message &req) {
+  if (user_id_ == -1) {
+    SendResponse(Protocol::Command::Move, 403, req.header.stream_id,
+                 {{"msg", "not logged in"}}, {});
+    return;
+  }
+
+  int file_id = req.json_payload.value("file_id", -1);
+  int new_parent_id = req.json_payload.value("new_parent_id", -1);
+
+  if (file_id == -1 || new_parent_id == -1) {
+    SendResponse(Protocol::Command::Move, 400, req.header.stream_id,
+                 {{"msg", "missing file_id or new_parent_id"}}, {});
+    return;
+  }
+
+  if (Database::GetInstance().MoveFile(user_id_, file_id, new_parent_id)) {
+    SendResponse(Protocol::Command::Move, 200, req.header.stream_id,
+                 {{"msg", "success"}}, {});
+  } else {
+    SendResponse(Protocol::Command::Move, 500, req.header.stream_id,
+                 {{"msg", "db error"}}, {});
+  }
+}
+
 void Session::HandleRemove(const Protocol::Message &req) {
   if (user_id_ == -1) {
     SendResponse(Protocol::Command::Remove, 403, req.header.stream_id,
@@ -294,8 +366,6 @@ void Session::HandleRemove(const Protocol::Message &req) {
   }
 
   int file_id = req.json_payload.value("file_id", -1);
-  int parent_id = req.json_payload.value("parent_id", 0);
-
   if (file_id == -1) {
     SendResponse(Protocol::Command::Remove, 400, req.header.stream_id,
                  {{"msg", "missing file_id"}}, {});
@@ -309,48 +379,40 @@ void Session::HandleRemove(const Protocol::Message &req) {
     return;
   }
 
-  std::string filename = file_info["filename"];
-
-  // 1. Delete from database
-  if (!Database::GetInstance().DeleteFile(user_id_, parent_id, filename)) {
-    SendResponse(Protocol::Command::Remove, 500, req.header.stream_id,
-                 {{"msg", "db error"}}, {});
-    return;
+  // If it's a directory, we need to delete all subfiles and subdirectories recursively.
+  // We use GetAllSubFiles to get all descendants.
+  bool is_dir = false;
+  if (file_info.contains("is_dir")) {
+      is_dir = file_info["is_dir"].is_boolean() ? file_info["is_dir"].get<bool>() : (file_info["is_dir"].get<int>() != 0);
   }
 
-  // 2. Delete from filesystem (Async)
-  std::string full_path = "data/" + std::to_string(user_id_) + "/" + filename;
-
-  // Note: We use a new uv_fs_t for unlink to avoid conflict with other active
-  // FS ops if any
-  uv_fs_t *unlink_req = new uv_fs_t();
-  unlink_req->data = new IOCtx{shared_from_this(), req.header.stream_id};
-
-  int r = uv_fs_unlink(
-      socket_.loop, unlink_req, full_path.c_str(), [](uv_fs_t *req) {
-        auto *ctx = static_cast<IOCtx *>(req->data);
-        if (req->result < 0 && req->result != UV_ENOENT) {
-          LOG_ERROR("uv_fs_unlink error: {}", uv_strerror(req->result));
-          ctx->session->SendResponse(Protocol::Command::Remove, 500,
-                                     ctx->stream_id,
-                                     {{"msg", "filesystem error"}}, {});
-        } else {
-          LOG_INFO("File deleted: {}", req->path);
-          ctx->session->SendResponse(Protocol::Command::Remove, 200,
-                                     ctx->stream_id, {{"msg", "success"}}, {});
-        }
-        uv_fs_req_cleanup(req);
-        delete ctx;
-        delete req;
-      });
-
-  if (r < 0) {
-    LOG_ERROR("uv_fs_unlink start error: {}", uv_strerror(r));
-    delete static_cast<IOCtx *>(unlink_req->data);
-    delete unlink_req;
-    SendResponse(Protocol::Command::Remove, 500, req.header.stream_id,
-                 {{"msg", "unlink failed to start"}}, {});
+  std::vector<nlohmann::json> to_delete;
+  if (is_dir) {
+      to_delete = Database::GetInstance().GetAllSubFiles(user_id_, file_id);
   }
+  to_delete.push_back(file_info); // Add the target itself
+
+  for (const auto& item : to_delete) {
+      int id = item["id"];
+      bool item_is_dir = false;
+      if (item.contains("is_dir")) {
+          item_is_dir = item["is_dir"].is_boolean() ? item["is_dir"].get<bool>() : (item["is_dir"].get<int>() != 0);
+      }
+      std::string path = item.value("file_path", "");
+
+      // 1. Delete from database
+      Database::GetInstance().DeleteFile(user_id_, id);
+
+      // 2. Delete from filesystem if it's a physical file
+      if (!item_is_dir && !path.empty()) {
+          uv_fs_t unlink_req;
+          uv_fs_unlink(socket_.loop, &unlink_req, path.c_str(), nullptr);
+          uv_fs_req_cleanup(&unlink_req);
+      }
+  }
+
+  SendResponse(Protocol::Command::Remove, 200, req.header.stream_id,
+               {{"msg", "success"}}, {});
 }
 
 void Session::HandleUploadReq(const Protocol::Message &req) {
@@ -362,14 +424,16 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
 
   std::string filename = req.json_payload.value("filename", "unknown");
   size_t total_size = req.json_payload.value("filesize", 0);
+  int parent_id = req.json_payload.value("parent_id", 0);
   uint32_t stream_id = req.header.stream_id;
 
-  LOG_INFO("Client wants to upload file: {}, total_size: {}, stream: {}",
-           filename, total_size, stream_id);
+  LOG_INFO("Client wants to upload file: {}, total_size: {}, parent_id: {}, stream: {}",
+           filename, total_size, parent_id, stream_id);
 
   auto task = std::make_shared<FileTask>();
   task->stream_id = stream_id;
   task->current_filename = filename;
+  task->parent_id = parent_id;
   task->total_filesize = total_size;
   task->is_uploading = true;
   active_tasks_[stream_id] = task;
@@ -393,16 +457,24 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   uv_fs_req_cleanup(&stat_req);
 
   if (current_offset >= total_size && total_size > 0) {
-    auto existing = Database::GetInstance().GetFile(user_id_, 0, filename);
+    auto existing = Database::GetInstance().GetFile(user_id_, parent_id, filename);
     if (existing.empty() || existing["filesize"] != (int64_t)current_offset) {
-      Database::GetInstance().AddFile(user_id_, 0, filename, current_offset,
+      Database::GetInstance().AddFile(user_id_, parent_id, filename, current_offset,
                                       false, full_path);
     }
+    LOG_INFO("File already fully uploaded. Offset: {}, Total: {}",
+             current_offset, total_size);
     SendResponse(Protocol::Command::UploadReq, 200, stream_id,
-                 {{"msg", "already uploaded"}, {"offset", current_offset}}, {});
+                 {{"offset", current_offset},
+                  {"status", "complete"},
+                  {"msg", "file already complete"}},
+                 {});
     active_tasks_.erase(stream_id);
     return;
   }
+
+  // File is new or partially uploaded. Ensure DB entry exists.
+  Database::GetInstance().AddFile(user_id_, parent_id, filename, total_size, false, full_path);
 
   // 3. Open file for writing
   task->file_offset = current_offset;
@@ -457,6 +529,11 @@ void Session::HandleUploadData(const Protocol::Message &req) {
   ctx->session = shared_from_this();
   ctx->stream_id = stream_id;
   ctx->data = req.binary_payload;
+  
+  if (!user_key_.empty()) {
+      CryptoUtils::ProcessCTR(user_key_, task->file_offset, ctx->data);
+  }
+  
   ctx->buf = uv_buf_init(ctx->data.data(), ctx->data.size());
 
   uv_fs_t *write_req = new uv_fs_t();
@@ -677,7 +754,7 @@ void Session::OnFileClose(uv_fs_t *req) {
   if (task->is_uploading && !task->current_filename.empty()) {
     std::string path = "data/" + std::to_string(session->user_id_) + "/" +
                        task->current_filename;
-    Database::GetInstance().AddFile(session->user_id_, 0,
+    Database::GetInstance().AddFile(session->user_id_, task->parent_id,
                                     task->current_filename,
                                     task->total_filesize, false, path);
     LOG_INFO("File metadata synced to database for stream {}: {}", sid,
@@ -716,6 +793,11 @@ void Session::OnFileRead(uv_fs_t *req) {
 
     std::vector<char> data(task->file_read_buf,
                            task->file_read_buf + bytes_read);
+
+    if (!session->user_key_.empty()) {
+        CryptoUtils::ProcessCTR(session->user_key_, task->file_offset - bytes_read, data);
+    }
+
     session->SendResponse(Protocol::Command::DownloadData, 200, sid,
                           {{"eof", false}}, data);
 

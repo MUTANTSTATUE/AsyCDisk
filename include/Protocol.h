@@ -40,6 +40,8 @@ enum class Command : uint16_t {
   MakeDir = 3,
   Remove = 4,
   Register = 5,
+  Move = 6,
+  ListAllDirs = 7,
 
   // File Transfer
   UploadReq = 10,  // Request to upload a file (contains file metadata in JSON)

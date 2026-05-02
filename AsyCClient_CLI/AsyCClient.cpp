@@ -200,10 +200,10 @@ bool AsyCClient::Login(const std::string &user, const std::string &pass) {
   return success;
 }
 
-json AsyCClient::List() {
+json AsyCClient::List(int parent_id) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
-  if (!SendPacket(Protocol::Command::ListDir, sid, {{"parent_id", 0}})) {
+  if (!SendPacket(Protocol::Command::ListDir, sid, {{"parent_id", parent_id}})) {
     DeleteStream(sid);
     return {};
   }
@@ -217,12 +217,29 @@ json AsyCClient::List() {
   return result;
 }
 
-void AsyCClient::Upload(const std::string &local_path, 
+json AsyCClient::GetAllDirs() {
+  uint32_t sid = next_stream_id_++;
+  CreateStream(sid);
+  if (!SendPacket(Protocol::Command::ListAllDirs, sid, {})) {
+    DeleteStream(sid);
+    return {};
+  }
+
+  auto msg = WaitNextMessage(sid);
+  json result = {};
+  if (msg.header.magic != 0 && msg.header.status == 200) {
+    result = msg.json_payload["dirs"];
+  }
+  DeleteStream(sid);
+  return result;
+}
+
+void AsyCClient::Upload(const std::string &local_path, int parent_id,
                         std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
 
-  std::thread([this, local_path, sid, cb]() {
+  std::thread([this, local_path, parent_id, sid, cb]() {
     std::ifstream file(local_path, std::ios::binary);
     if (!file) {
       std::cout << "\n[Stream #" << sid << " ERR] Cannot open local file: " << local_path << std::endl;
@@ -238,7 +255,7 @@ void AsyCClient::Upload(const std::string &local_path,
     std::cout << "\n[Stream #" << sid << " INFO] Starting upload: " << filename << " (" << filesize << " bytes)" << std::endl;
 
     if (!SendPacket(Protocol::Command::UploadReq, sid,
-                    {{"filename", filename}, {"filesize", filesize}})) {
+                    {{"filename", filename}, {"filesize", filesize}, {"parent_id", parent_id}})) {
       DeleteStream(sid);
       return;
     }
@@ -371,6 +388,42 @@ void AsyCClient::StreamDownload(int file_id, uint64_t offset,
     
     DeleteStream(sid);
   }).detach();
+}
+
+void AsyCClient::MakeDir(int parent_id, const std::string &dirname, 
+                         std::function<void(bool success, std::string message)> cb) {
+  uint32_t sid = next_stream_id_++;
+  CreateStream(sid);
+  if (!SendPacket(Protocol::Command::MakeDir, sid, {{"parent_id", parent_id}, {"dirname", dirname}})) {
+    if (cb) cb(false, "Network error");
+    DeleteStream(sid);
+    return;
+  }
+
+  auto msg = WaitNextMessage(sid);
+  if (cb) {
+    bool success = (msg.header.magic != 0 && msg.header.status == 200);
+    cb(success, msg.json_payload.value("msg", "unknown error"));
+  }
+  DeleteStream(sid);
+}
+
+void AsyCClient::Move(int file_id, int new_parent_id, 
+                      std::function<void(bool success, std::string message)> cb) {
+  uint32_t sid = next_stream_id_++;
+  CreateStream(sid);
+  if (!SendPacket(Protocol::Command::Move, sid, {{"file_id", file_id}, {"new_parent_id", new_parent_id}})) {
+    if (cb) cb(false, "Network error");
+    DeleteStream(sid);
+    return;
+  }
+
+  auto msg = WaitNextMessage(sid);
+  if (cb) {
+    bool success = (msg.header.magic != 0 && msg.header.status == 200);
+    cb(success, msg.json_payload.value("msg", "unknown error"));
+  }
+  DeleteStream(sid);
 }
 
 void AsyCClient::Remove(int file_id, std::function<void(bool success, std::string message)> cb) {

@@ -31,8 +31,9 @@ public:
   void Close();
 
   bool Login(const std::string &user, const std::string &pass);
-  json List();
-  void Upload(const std::string &local_path, 
+  json List(int parent_id = 0);
+  json GetAllDirs();
+  void Upload(const std::string &local_path, int parent_id = 0,
               std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
   void Download(int file_id, 
                 std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
@@ -43,6 +44,12 @@ public:
                       
   void Remove(int file_id, 
               std::function<void(bool success, std::string message)> cb = nullptr);
+              
+  void MakeDir(int parent_id, const std::string &dirname, 
+               std::function<void(bool success, std::string message)> cb = nullptr);
+               
+  void Move(int file_id, int new_parent_id, 
+            std::function<void(bool success, std::string message)> cb = nullptr);
 
 private:
   void ShowProgressBar(uint64_t current, uint64_t total);

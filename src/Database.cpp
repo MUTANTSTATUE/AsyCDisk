@@ -240,10 +240,10 @@ bool Database::AddFile(int owner_id, int parent_id, const std::string& filename,
     return success;
 }
 
-bool Database::DeleteFile(int owner_id, int parent_id, const std::string& filename) {
+bool Database::DeleteFile(int owner_id, int file_id) {
     std::lock_guard lock(mutex_);
     sqlite3_stmt* stmt;
-    const char* sql = "DELETE FROM files WHERE owner_id = ? AND parent_id = ? AND filename = ?;";
+    const char* sql = "DELETE FROM files WHERE owner_id = ? AND id = ?;";
     
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -252,8 +252,7 @@ bool Database::DeleteFile(int owner_id, int parent_id, const std::string& filena
     }
 
     sqlite3_bind_int(stmt, 1, owner_id);
-    sqlite3_bind_int(stmt, 2, parent_id);
-    sqlite3_bind_text(stmt, 3, filename.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, file_id);
 
     bool success = (sqlite3_step(stmt) == SQLITE_DONE);
     if (!success) {
@@ -262,4 +261,53 @@ bool Database::DeleteFile(int owner_id, int parent_id, const std::string& filena
 
     sqlite3_finalize(stmt);
     return success;
+}
+
+bool Database::MoveFile(int owner_id, int file_id, int new_parent_id) {
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "UPDATE files SET parent_id = ? WHERE owner_id = ? AND id = ?;";
+    
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR("MoveFile prepare failed: {}", sqlite3_errmsg(db_));
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, new_parent_id);
+    sqlite3_bind_int(stmt, 2, owner_id);
+    sqlite3_bind_int(stmt, 3, file_id);
+
+    bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!success) {
+        LOG_ERROR("MoveFile execution failed: {}", sqlite3_errmsg(db_));
+    }
+
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+std::vector<nlohmann::json> Database::GetAllSubFiles(int user_id, int parent_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<nlohmann::json> result;
+    
+    std::string sql = "WITH RECURSIVE subfiles AS ("
+                      "  SELECT id, filename, is_dir, file_path FROM files WHERE owner_id = " + std::to_string(user_id) + " AND parent_id = " + std::to_string(parent_id) +
+                      "  UNION ALL "
+                      "  SELECT f.id, f.filename, f.is_dir, f.file_path FROM files f "
+                      "  INNER JOIN subfiles s ON f.parent_id = s.id WHERE f.owner_id = " + std::to_string(user_id) +
+                      ") SELECT id, filename, is_dir, file_path FROM subfiles;";
+                      
+    nlohmann::json queryResult = Query(sql);
+    for (auto& item : queryResult) {
+        result.push_back(item);
+    }
+    
+    return result;
+}
+
+nlohmann::json Database::GetAllDirectories(int user_id) {
+    std::string sql = "SELECT id, parent_id, filename FROM files WHERE owner_id = " + 
+                      std::to_string(user_id) + " AND is_dir = 1;";
+    return Query(sql);
 }

@@ -26,7 +26,14 @@ public:
     nlohmann::json GetFile(int user_id, int parent_id, const std::string& filename);
     nlohmann::json GetFileById(int user_id, int file_id);
     bool AddFile(int owner_id, int parent_id, const std::string& filename, size_t size, bool is_dir, const std::string& path);
-    bool DeleteFile(int owner_id, int parent_id, const std::string& filename);
+    bool DeleteFile(int owner_id, int file_id);
+    bool MoveFile(int owner_id, int file_id, int new_parent_id);
+    
+    // Helper to get all subfiles (including directories) recursively
+    std::vector<nlohmann::json> GetAllSubFiles(int user_id, int parent_id);
+    
+    // Get all directories for a user
+    nlohmann::json GetAllDirectories(int user_id);
 
 private:
     Database() = default;
