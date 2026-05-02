@@ -20,6 +20,8 @@ struct StreamContext {
   std::mutex mtx;
   std::condition_variable cv;
   bool closed = false;
+  bool aborted = false;
+  bool paused = false;
 };
 
 class AsyCClient {
@@ -35,7 +37,7 @@ public:
   json GetAllDirs();
   void Upload(const std::string &local_path, int parent_id = 0,
               std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
-  void Download(int file_id, 
+  void Download(int file_id, const std::string &local_path = "",
                 std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
   
   // Stream download for HTTP proxy preview
@@ -51,7 +53,23 @@ public:
   void Move(int file_id, int new_parent_id, 
             std::function<void(bool success, std::string message)> cb = nullptr);
 
+  void AbortStream(uint32_t sid);
+  void PauseStream(uint32_t sid);
+  void ResumeStream(uint32_t sid);
+
+  struct IncompleteTask {
+      int file_id;
+      std::string filename;
+      std::string username; // 新增用户名字段
+      uint64_t total_size;
+      uint64_t current_offset;
+      std::string local_path;
+  };
+  
+  static std::vector<IncompleteTask> ScanIncompleteDownloads(const std::string &directory);
+
 private:
+  std::string current_user_; // 记录当前登录用户
   void ShowProgressBar(uint64_t current, uint64_t total);
   std::string FormatSize(uint64_t bytes);
   

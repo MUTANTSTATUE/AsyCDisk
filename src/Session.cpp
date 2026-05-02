@@ -1,6 +1,7 @@
 #include "Session.h"
 #include "Database.h"
 #include "Logger.h"
+#include "Config.h"
 #include <cstring>
 #include <uv.h>
 
@@ -12,11 +13,42 @@ struct IOCtx {
 Session::Session(uv_loop_t *loop) {
   uv_tcp_init(loop, &socket_);
   socket_.data = this;
+  uv_timer_init(loop, &rate_timer_);
+  rate_timer_.data = this;
+  uv_timer_start(&rate_timer_, Session::OnRateTimer, 1000, 1000);
 }
 
 Session::~Session() {
-  // Active tasks should ideally be closed, but for now just cleanup
+  uv_timer_stop(&rate_timer_);
   LOG_INFO("Session destroyed.");
+}
+
+void Session::OnRateTimer(uv_timer_t *handle) {
+    Session *session = static_cast<Session *>(handle->data);
+    session->upload_bytes_this_sec_ = 0;
+    session->download_bytes_this_sec_ = 0;
+    
+    // Resume Uploads
+    if (session->is_reading_paused_) {
+        session->is_reading_paused_ = false;
+        uv_read_start((uv_stream_t *)&session->socket_, Session::OnAlloc, Session::OnRead);
+    }
+
+    // Resume Downloads
+    if (!session->suspended_downloads_.empty()) {
+        for (uint32_t sid : session->suspended_downloads_) {
+            auto it = session->active_tasks_.find(sid);
+            if (it != session->active_tasks_.end()) {
+                auto task = it->second;
+                uv_buf_t buf = uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
+                uv_fs_t *read_req = new uv_fs_t();
+                read_req->data = new IOCtx{session->shared_from_this(), sid};
+                uv_fs_read(session->socket_.loop, read_req, task->file_handle, &buf, 1,
+                           task->file_offset, Session::OnFileRead);
+            }
+        }
+        session->suspended_downloads_.clear();
+    }
 }
 
 void Session::Start() {
@@ -63,6 +95,15 @@ void Session::OnRead(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     LOG_TRACE("Session received {} bytes.", nread);
     session->recv_buf_.insert(session->recv_buf_.end(), buf->base,
                               buf->base + nread);
+    
+    // Rate Limiting (Upload)
+    session->upload_bytes_this_sec_ += nread;
+    int upload_limit_kbps = Config::GetInstance().Get<int>("limits/upload_kbps", 0);
+    if (upload_limit_kbps > 0 && session->upload_bytes_this_sec_ >= (uint64_t)upload_limit_kbps * 1024) {
+        session->is_reading_paused_ = true;
+        uv_read_stop(stream);
+    }
+
     session->ProcessBuffer();
   } else if (nread < 0) {
     if (nread == UV_EOF) {
@@ -430,16 +471,17 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   LOG_INFO("Client wants to upload file: {}, total_size: {}, parent_id: {}, stream: {}",
            filename, total_size, parent_id, stream_id);
 
+  std::string user_dir = "data/" + std::to_string(user_id_);
+  std::string full_path = user_dir + "/" + filename;
+
   auto task = std::make_shared<FileTask>();
   task->stream_id = stream_id;
   task->current_filename = filename;
+  task->full_path = full_path;
   task->parent_id = parent_id;
   task->total_filesize = total_size;
   task->is_uploading = true;
   active_tasks_[stream_id] = task;
-
-  std::string user_dir = "data/" + std::to_string(user_id_);
-  std::string full_path = user_dir + "/" + filename;
 
   // 1. Ensure user directory exists
   uv_fs_t mkdir_req;
@@ -473,8 +515,7 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
     return;
   }
 
-  // File is new or partially uploaded. Ensure DB entry exists.
-  Database::GetInstance().AddFile(user_id_, parent_id, filename, total_size, false, full_path);
+  // File is new or partially uploaded. We will add it to DB only when upload finishes.
 
   // 3. Open file for writing
   task->file_offset = current_offset;
@@ -625,11 +666,14 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   }
 
   std::string filename = file_info["filename"];
-  std::string full_path = "data/" + std::to_string(user_id_) + "/" + filename;
+  std::string path = file_info["file_path"];
+  int64_t filesize = file_info["filesize"];
 
   auto task = std::make_shared<FileTask>();
   task->stream_id = stream_id;
+  task->total_filesize = filesize;
   task->current_filename = filename;
+  task->full_path = path;
   task->file_offset = offset;
   task->is_uploading = false;
   active_tasks_[stream_id] = task;
@@ -639,7 +683,7 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   open_req->data = new IOCtx{shared_from_this(), stream_id};
 
   int r = uv_fs_open(
-      socket_.loop, open_req, full_path.c_str(), O_RDONLY, 0, [](uv_fs_t *req) {
+      socket_.loop, open_req, path.c_str(), O_RDONLY, 0, [](uv_fs_t *req) {
         auto *ctx = static_cast<IOCtx *>(req->data);
         auto session = ctx->session;
         uint32_t sid = ctx->stream_id;
@@ -749,19 +793,23 @@ void Session::OnFileClose(uv_fs_t *req) {
   }
   auto task = it->second;
 
-  LOG_INFO("File closed for stream {}, fd: {}", sid, task->file_handle);
+    // If this was an upload, now is the time to add it to the database
+    if (task->is_uploading) {
+        if (Database::GetInstance().AddFile(session->user_id_, task->parent_id, task->current_filename, 
+                                            task->total_filesize, false, task->full_path)) {
+            LOG_INFO("File {} added to database after successful upload.", 
+                     task->current_filename);
+        } else {
+            LOG_ERROR("Failed to add file {} to database after upload.", task->current_filename);
+        }
+    }
 
-  if (task->is_uploading && !task->current_filename.empty()) {
-    std::string path = "data/" + std::to_string(session->user_id_) + "/" +
-                       task->current_filename;
-    Database::GetInstance().AddFile(session->user_id_, task->parent_id,
-                                    task->current_filename,
-                                    task->total_filesize, false, path);
-    LOG_INFO("File metadata synced to database for stream {}: {}", sid,
-             task->current_filename);
-    session->SendResponse(Protocol::Command::UploadData, 200, sid,
-                          {{"msg", "upload complete"}}, {});
-  }
+    LOG_INFO("File closed for stream {}, fd: {}", sid, task->file_handle);
+    
+    if (task->is_uploading) {
+        session->SendResponse(Protocol::Command::UploadData, 200, sid,
+                              {{"msg", "upload complete"}}, {});
+    }
 
   session->active_tasks_.erase(sid);
   uv_fs_req_cleanup(req);
@@ -803,11 +851,22 @@ void Session::OnFileRead(uv_fs_t *req) {
 
     uv_fs_req_cleanup(req); // MUST cleanup before reuse
 
-    // Continue reading next chunk
-    uv_buf_t buf =
-        uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
+    // Rate Limiting (Download)
+    session->download_bytes_this_sec_ += bytes_read;
+    int download_limit_kbps = Config::GetInstance().Get<int>("limits/download_kbps", 0);
+    
+    if (download_limit_kbps > 0 && session->download_bytes_this_sec_ >= (uint64_t)download_limit_kbps * 1024) {
+        // Suspend this stream. It will be resumed by OnRateTimer.
+        session->suspended_downloads_.insert(sid);
+        uv_fs_req_cleanup(req);
+        delete req; // In this case we delete the req because a new one will be created upon resume
+        return;
+    }
+
+    uv_buf_t buf = uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
     uv_fs_read(session->socket_.loop, req, task->file_handle, &buf, 1,
                task->file_offset, Session::OnFileRead);
+
   } else if (req->result == 0) {
     // EOF
     LOG_INFO("Download complete for stream {}.", sid);

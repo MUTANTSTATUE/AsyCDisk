@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <set>
 #include <uv.h>
 #include <vector>
 
@@ -62,6 +63,17 @@ private:
 
   // File IO (Multiplexed)
   std::unordered_map<uint32_t, std::shared_ptr<FileTask>> active_tasks_;
+
+  // Rate Limiting
+  uint64_t upload_bytes_this_sec_ = 0;
+  uint64_t download_bytes_this_sec_ = 0;
+  uv_timer_t rate_timer_;
+  bool is_reading_paused_ = false;
+
+  void ResetRateLimits();
+  static void OnRateTimer(uv_timer_t *handle);
+  
+  std::set<uint32_t> suspended_downloads_; // 存储因限速被挂起的下载 Stream ID
 
   static void OnFileOpen(uv_fs_t *req);
   static void OnFileWrite(uv_fs_t *req);

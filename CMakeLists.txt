@@ -48,6 +48,7 @@ add_executable(AsyCDisk
     src/Session.cpp
     src/Database.cpp
     src/CryptoUtils.cpp
+    src/Config.cpp
 )
 
 # Link libraries
@@ -59,4 +60,11 @@ target_link_libraries(AsyCDisk PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
+)
+
+# 自动将配置文件拷贝到生成目录
+configure_file(
+    ${CMAKE_SOURCE_DIR}/config.json 
+    ${CMAKE_BINARY_DIR}/config.json 
+    COPYONLY
 )

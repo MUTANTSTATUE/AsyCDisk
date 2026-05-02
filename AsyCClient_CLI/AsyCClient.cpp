@@ -87,6 +87,29 @@ void AsyCClient::DeleteStream(uint32_t sid) {
   streams_.erase(sid);
 }
 
+void AsyCClient::AbortStream(uint32_t sid) {
+  std::lock_guard<std::mutex> lock(streams_mutex_);
+  if (streams_.count(sid)) {
+    streams_[sid]->aborted = true;
+    streams_[sid]->cv.notify_all();
+  }
+}
+
+void AsyCClient::PauseStream(uint32_t sid) {
+  std::lock_guard<std::mutex> lock(streams_mutex_);
+  if (streams_.count(sid)) {
+    streams_[sid]->paused = true;
+  }
+}
+
+void AsyCClient::ResumeStream(uint32_t sid) {
+  std::lock_guard<std::mutex> lock(streams_mutex_);
+  if (streams_.count(sid)) {
+    streams_[sid]->paused = false;
+    streams_[sid]->cv.notify_all();
+  }
+}
+
 bool AsyCClient::SendPacket(Protocol::Command cmd, uint32_t stream_id,
                             const json &j_payload,
                             const std::vector<char> &b_payload) {
@@ -192,6 +215,7 @@ bool AsyCClient::Login(const std::string &user, const std::string &pass) {
     std::cout << "[OK] Login successful. UserID: " << msg.json_payload["user_id"]
               << std::endl;
     success = true;
+    current_user_ = user;
   } else {
     std::cout << "[ERR] Login failed: " << msg.json_payload.value("msg", "unknown error")
               << std::endl;
@@ -280,19 +304,45 @@ void AsyCClient::Upload(const std::string &local_path, int parent_id,
       std::vector<char> chunk(buf, buf + read);
       if (!SendPacket(Protocol::Command::UploadData, sid, {}, chunk))
         break;
+      
+      {
+        std::unique_lock<std::mutex> lock(streams_mutex_);
+        if (streams_.count(sid)) {
+            auto ctx = streams_[sid];
+            if (ctx->aborted) {
+                std::cout << "\n[Stream #" << sid << " ABORT] Upload aborted by user." << std::endl;
+                SendPacket(Protocol::Command::UploadData, sid, {{"abort", true}}, {});
+                break;
+            }
+            // Wait if paused
+            ctx->cv.wait(lock, [ctx] { return !ctx->paused || ctx->aborted; });
+            if (ctx->aborted) break;
+        }
+      }
+
       uploaded += read;
       if (cb) cb(sid, uploaded, filesize);
     }
+    // Check if aborted before finalization
+    bool was_aborted = false;
+    {
+        std::lock_guard<std::mutex> lock(streams_mutex_);
+        if (streams_.count(sid) && streams_[sid]->aborted) was_aborted = true;
+    }
 
-    // Send completion signal (empty binary)
-    SendPacket(Protocol::Command::UploadData, sid, {}, {});
-    
-    auto msg_done = WaitNextMessage(sid);
-    if (msg_done.header.status == 200) {
-      if (cb) cb(sid, filesize, filesize);
-      std::cout << "\n[Stream #" << sid << " OK] Upload finished: " << filename << std::endl;
+    if (!was_aborted) {
+        // Send completion signal (empty binary)
+        SendPacket(Protocol::Command::UploadData, sid, {}, {});
+        
+        auto msg_done = WaitNextMessage(sid);
+        if (msg_done.header.status == 200) {
+            if (cb) cb(sid, filesize, filesize);
+            std::cout << "\n[Stream #" << sid << " OK] Upload finished: " << filename << std::endl;
+        } else {
+            std::cout << "\n[Stream #" << sid << " ERR] Upload error at finalization." << std::endl;
+        }
     } else {
-      std::cout << "\n[Stream #" << sid << " ERR] Upload error at finalization." << std::endl;
+        std::cout << "\n[Stream #" << sid << " INFO] Upload loop exited due to abort." << std::endl;
     }
 
     DeleteStream(sid);
@@ -301,13 +351,28 @@ void AsyCClient::Upload(const std::string &local_path, int parent_id,
   std::cout << "[INFO] Upload started in background (Stream #" << sid << ")" << std::endl;
 }
 
-void AsyCClient::Download(int file_id, 
+void AsyCClient::Download(int file_id, const std::string &local_path,
                           std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
 
-  std::thread([this, file_id, sid, cb]() {
-    if (!SendPacket(Protocol::Command::DownloadReq, sid, {{"file_id", file_id}})) {
+  std::thread([this, file_id, local_path, sid, cb]() {
+    uint64_t offset = 0;
+    std::string target_path = local_path;
+    std::string tmp_path = target_path + ".tmp";
+    std::string meta_path = target_path + ".tmp.meta";
+
+    // 尝试从 .tmp 文件找进度
+    std::ifstream existing(tmp_path, std::ios::binary | std::ios::ate);
+    if (existing) {
+        offset = existing.tellg();
+        existing.close();
+    }
+
+    json req = {{"file_id", file_id}};
+    if (offset > 0) req["offset"] = offset;
+
+    if (!SendPacket(Protocol::Command::DownloadReq, sid, req)) {
       DeleteStream(sid);
       return;
     }
@@ -319,29 +384,83 @@ void AsyCClient::Download(int file_id,
     }
 
     std::string filename = msg_init.json_payload.value("filename", "downloaded_file");
+    if (target_path.empty()) {
+        target_path = filename;
+        tmp_path = target_path + ".tmp";
+        meta_path = target_path + ".tmp.meta";
+    }
+
     uint64_t filesize = msg_init.json_payload.value("filesize", 
                           msg_init.json_payload.value("total_size", (uint64_t)0));
     
-    std::ofstream file(filename, std::ios::binary);
+    // 创建/更新元数据文件
+    {
+        std::ofstream meta_f(meta_path);
+        if (meta_f) {
+            json meta_j = {
+                {"file_id", file_id},
+                {"filename", filename},
+                {"username", current_user_}, // 保存用户名
+                {"total_size", filesize}
+            };
+            meta_f << meta_j.dump();
+        }
+    }
+
+    // 打开 .tmp 文件
+    std::ofstream file;
+    if (offset > 0) {
+        file.open(tmp_path, std::ios::binary | std::ios::app);
+        std::cout << "[Stream #" << sid << " INFO] Resuming download to .tmp: " << offset << " / " << filesize << std::endl;
+    } else {
+        file.open(tmp_path, std::ios::binary);
+    }
+
     if (!file) {
       DeleteStream(sid);
       return;
     }
 
-    uint64_t downloaded = 0;
-    if (cb) cb(sid, 0, filesize); // 发送“已启动”信号
+    uint64_t downloaded = offset;
+    bool aborted_internally = false;
+    if (cb) cb(sid, downloaded, filesize);
 
     while (downloaded < filesize) {
       auto msg = WaitNextMessage(sid);
       if (msg.header.magic == 0) break;
       
+      {
+          std::unique_lock<std::mutex> lock(streams_mutex_);
+          if (streams_.count(sid)) {
+              auto ctx = streams_[sid];
+              if (ctx->aborted) {
+                  SendPacket(Protocol::Command::DownloadReq, sid, {{"abort", true}});
+                  aborted_internally = true;
+                  break;
+              }
+              ctx->cv.wait(lock, [ctx] { return !ctx->paused || ctx->aborted; });
+              if (ctx->aborted) { aborted_internally = true; break; }
+          }
+      }
+      
       file.write(msg.binary_payload.data(), msg.binary_payload.size());
       downloaded += msg.binary_payload.size();
-      
       if (cb) cb(sid, downloaded, filesize);
     }
     
-    if (cb) cb(sid, filesize, filesize); // Final 100%
+    file.close(); 
+    if (aborted_internally) {
+        // 中断不删除 .tmp，保留以供下次续传
+        std::cout << "[Stream #" << sid << " INFO] Download paused/aborted, kept .tmp file." << std::endl;
+    } else if (downloaded >= filesize) {
+        // 完成：转正并删除元数据
+        if (std::rename(tmp_path.c_str(), target_path.c_str()) == 0) {
+            std::remove(meta_path.c_str());
+            std::cout << "[Stream #" << sid << " INFO] Download complete, renamed to: " << target_path << std::endl;
+        }
+        if (cb) cb(sid, filesize, filesize); 
+    }
+    
     DeleteStream(sid);
   }).detach();
 }
@@ -446,4 +565,49 @@ void AsyCClient::Remove(int file_id, std::function<void(bool success, std::strin
     }
     DeleteStream(sid);
   }).detach();
+}
+#include <dirent.h>
+#include <sys/stat.h>
+
+std::vector<AsyCClient::IncompleteTask> AsyCClient::ScanIncompleteDownloads(const std::string &directory) {
+    std::vector<IncompleteTask> tasks;
+    DIR *dir = opendir(directory.c_str());
+    if (!dir) return tasks;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        std::string filename = ent->d_name;
+        if (filename.size() > 9 && filename.substr(filename.size() - 9) == ".tmp.meta") {
+            std::string meta_path = (directory == "." ? "" : directory + "/") + filename;
+            std::string tmp_path = meta_path.substr(0, meta_path.size() - 5); // 移除 .meta
+            std::string original_path = tmp_path.substr(0, tmp_path.size() - 4); // 移除 .tmp
+
+            std::ifstream meta_f(meta_path);
+            if (meta_f) {
+                try {
+                    json meta_j;
+                    meta_f >> meta_j;
+                    
+                    IncompleteTask task;
+                    task.file_id = meta_j["file_id"];
+                    task.filename = meta_j["filename"];
+                    task.username = meta_j.value("username", ""); // 读取用户名
+                    task.total_size = meta_j["total_size"];
+                    task.local_path = original_path;
+                    
+                    // 获取 .tmp 文件实际大小
+                    struct stat st;
+                    if (stat(tmp_path.c_str(), &st) == 0) {
+                        task.current_offset = st.st_size;
+                    } else {
+                        task.current_offset = 0;
+                    }
+                    
+                    tasks.push_back(task);
+                } catch (...) {}
+            }
+        }
+    }
+    closedir(dir);
+    return tasks;
 }
