@@ -506,6 +506,24 @@ void Session::HandleUploadData(const Protocol::Message &req) {
 }
 
 void Session::HandleDownloadReq(const Protocol::Message &req) {
+  if (req.json_payload.value("abort", false)) {
+    uint32_t sid = req.header.stream_id;
+    auto it = active_tasks_.find(sid);
+    if (it != active_tasks_.end()) {
+      auto task = it->second;
+      if (task->file_handle >= 0) {
+        uv_fs_t *close_req = new uv_fs_t();
+        close_req->data = new IOCtx{shared_from_this(), sid};
+        uv_fs_close(socket_.loop, close_req, task->file_handle, Session::OnFileClose);
+        task->file_handle = -1; // Prevent double close in pending reads
+      } else {
+        active_tasks_.erase(sid);
+      }
+      LOG_INFO("Download aborted by client for stream {}", sid);
+    }
+    return;
+  }
+
   if (user_id_ == -1) {
     SendResponse(Protocol::Command::DownloadData, 403, req.header.stream_id,
                  {{"msg", "not logged in"}}, {});
@@ -577,6 +595,8 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
 
           LOG_INFO("File opened for reading: {}, size: {}, stream: {}",
                    req->path, total_size, sid);
+
+          uv_fs_req_cleanup(req); // MUST cleanup before reuse
 
           // Trigger first read
           uv_buf_t buf =
@@ -698,6 +718,8 @@ void Session::OnFileRead(uv_fs_t *req) {
                            task->file_read_buf + bytes_read);
     session->SendResponse(Protocol::Command::DownloadData, 200, sid,
                           {{"eof", false}}, data);
+
+    uv_fs_req_cleanup(req); // MUST cleanup before reuse
 
     // Continue reading next chunk
     uv_buf_t buf =

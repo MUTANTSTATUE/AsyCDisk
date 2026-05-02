@@ -329,6 +329,50 @@ void AsyCClient::Download(int file_id,
   }).detach();
 }
 
+void AsyCClient::StreamDownload(int file_id, uint64_t offset,
+                                std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb) {
+  uint32_t sid = next_stream_id_++;
+  CreateStream(sid);
+
+  std::thread([this, file_id, offset, sid, cb]() {
+    if (!SendPacket(Protocol::Command::DownloadReq, sid, {{"file_id", file_id}, {"offset", offset}})) {
+      DeleteStream(sid);
+      return;
+    }
+
+    auto msg_init = WaitNextMessage(sid);
+    if (msg_init.header.magic == 0 || msg_init.header.status != 200) {
+      DeleteStream(sid);
+      return;
+    }
+
+    std::string filename = msg_init.json_payload.value("filename", "unknown");
+    uint64_t filesize = msg_init.json_payload.value("filesize", 
+                          msg_init.json_payload.value("total_size", (uint64_t)0));
+    
+    // We don't track downloaded bytes since this is just a stream pass-through.
+    // The server will stop sending when it reaches EOF.
+    while (true) {
+      auto msg = WaitNextMessage(sid);
+      bool is_eof = (msg.header.magic == 0 || msg.header.binary_len == 0);
+      
+      if (cb) {
+        if (!cb(msg.binary_payload, filesize, filename, is_eof)) {
+          if (!is_eof) {
+            // Callback returned false, meaning client disconnected or aborted
+            SendPacket(Protocol::Command::DownloadReq, sid, {{"abort", true}});
+          }
+          break; 
+        }
+      }
+      
+      if (is_eof) break;
+    }
+    
+    DeleteStream(sid);
+  }).detach();
+}
+
 void AsyCClient::Remove(int file_id, std::function<void(bool success, std::string message)> cb) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
