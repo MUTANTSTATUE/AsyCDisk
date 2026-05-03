@@ -159,9 +159,28 @@ bool Database::RegisterUser(const std::string& username, const std::string& pass
 }
 
 nlohmann::json Database::ListFiles(int user_id, int parent_id) {
-    std::string sql = "SELECT id, filename, filesize, is_dir, created_at FROM files WHERE owner_id = " + 
-                      std::to_string(user_id) + " AND parent_id = " + std::to_string(parent_id) + ";";
-    return Query(sql);
+    std::lock_guard lock(mutex_);
+    sqlite3_stmt* stmt;
+    const char* sql = "SELECT id, filename, filesize, is_dir, created_at FROM files WHERE owner_id = ? AND parent_id = ?;";
+    nlohmann::json result = nlohmann::json::array();
+
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return result;
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_int(stmt, 2, parent_id);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        nlohmann::json row;
+        row["id"] = sqlite3_column_int64(stmt, 0);
+        row["filename"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        row["filesize"] = sqlite3_column_int64(stmt, 2);
+        row["is_dir"] = sqlite3_column_int(stmt, 3);
+        row["created_at"] = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        result.push_back(row);
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 nlohmann::json Database::GetFile(int user_id, int parent_id, const std::string& filename) {

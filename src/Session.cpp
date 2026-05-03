@@ -474,6 +474,14 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   std::string user_dir = "data/" + std::to_string(user_id_);
   std::string full_path = user_dir + "/" + filename;
 
+  // 1. 检查物理文件是否已存在（断点续传寻址）
+  uint64_t current_offset = 0;
+  struct stat st;
+  if (stat(full_path.c_str(), &st) == 0) {
+      current_offset = st.st_size;
+      LOG_INFO("Physical file exists for upload. Found offset: {} for file: {}", current_offset, filename);
+  }
+
   auto task = std::make_shared<FileTask>();
   task->stream_id = stream_id;
   task->current_filename = filename;
@@ -481,6 +489,7 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   task->parent_id = parent_id;
   task->total_filesize = total_size;
   task->is_uploading = true;
+  task->file_offset = current_offset; // 设置起始偏移量
   active_tasks_[stream_id] = task;
 
   // 1. Ensure user directory exists
@@ -488,15 +497,7 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   uv_fs_mkdir(socket_.loop, &mkdir_req, user_dir.c_str(), 0755, nullptr);
   uv_fs_req_cleanup(&mkdir_req);
 
-  // 2. Check if file already exists to support resumable upload
-  uint64_t current_offset = 0;
-  uv_fs_t stat_req;
-  int r = uv_fs_stat(socket_.loop, &stat_req, full_path.c_str(), nullptr);
-  if (r == 0) {
-    current_offset = stat_req.statbuf.st_size;
-    LOG_INFO("File exists, current size: {}", current_offset);
-  }
-  uv_fs_req_cleanup(&stat_req);
+  // 2. Check if file is already complete
 
   if (current_offset >= total_size && total_size > 0) {
     auto existing = Database::GetInstance().GetFile(user_id_, parent_id, filename);
@@ -522,7 +523,7 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   uv_fs_t *open_req = new uv_fs_t();
   open_req->data = new IOCtx{shared_from_this(), stream_id};
 
-  r = uv_fs_open(socket_.loop, open_req, full_path.c_str(), O_WRONLY | O_CREAT,
+  int r = uv_fs_open(socket_.loop, open_req, full_path.c_str(), O_WRONLY | O_CREAT,
                  0644, Session::OnFileOpen);
   if (r < 0) {
     LOG_ERROR("uv_fs_open error: {}", uv_strerror(r));
