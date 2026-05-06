@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <uv.h>
 
 struct FileTask {
@@ -15,6 +16,6 @@ struct FileTask {
     bool is_uploading = false;
     uint32_t pending_fs_reqs = 0;
     bool closing_pending = false;
-    char file_read_buf[131072]; // 128KB read buffer per stream
+    std::vector<char> file_read_buf;
 };
 

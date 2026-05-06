@@ -14,5 +14,8 @@
     },
     "security": {
         "encryption_enabled": true
+    },
+    "performance": {
+        "read_buffer_size": 131072
     }
 }

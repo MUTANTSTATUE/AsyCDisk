@@ -51,7 +51,7 @@ void Session::OnRateTimer(uv_timer_t *handle) {
             auto it = session->active_tasks_.find(sid);
             if (it != session->active_tasks_.end()) {
                 auto task = it->second;
-                uv_buf_t buf = uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
+                uv_buf_t buf = uv_buf_init(task->file_read_buf.data(), task->file_read_buf.size());
                 uv_fs_t *read_req = new uv_fs_t();
                 read_req->data = new IOCtx{session->shared_from_this(), sid};
                 uv_fs_read(session->socket_.loop, read_req, task->file_handle, &buf, 1,
@@ -696,6 +696,10 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   task->full_path = path;
   task->file_offset = offset;
   task->is_uploading = false;
+  
+  int buf_size = Config::GetInstance().Get<int>("performance/read_buffer_size", 131072);
+  task->file_read_buf.resize(buf_size);
+
   active_tasks_[stream_id] = task;
 
   // Open file for reading
@@ -741,7 +745,7 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
 
           // Trigger first read
           uv_buf_t buf =
-              uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
+              uv_buf_init(task->file_read_buf.data(), task->file_read_buf.size());
           uv_fs_read(session->socket_.loop, req, task->file_handle, &buf, 1,
                      task->file_offset, Session::OnFileRead);
         } else {
@@ -859,8 +863,8 @@ void Session::OnFileRead(uv_fs_t *req) {
     size_t bytes_read = req->result;
     task->file_offset += bytes_read;
 
-    std::vector<char> data(task->file_read_buf,
-                           task->file_read_buf + bytes_read);
+    std::vector<char> data(task->file_read_buf.begin(),
+                           task->file_read_buf.begin() + bytes_read);
 
     if (!session->user_key_.empty()) {
         CryptoUtils::ProcessCTR(session->user_key_, task->file_offset - bytes_read, data);
@@ -883,7 +887,7 @@ void Session::OnFileRead(uv_fs_t *req) {
         return;
     }
 
-    uv_buf_t buf = uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
+    uv_buf_t buf = uv_buf_init(task->file_read_buf.data(), task->file_read_buf.size());
     int r = uv_fs_read(session->socket_.loop, req, task->file_handle, &buf, 1,
                        task->file_offset, Session::OnFileRead);
     if (r < 0) {

@@ -65,7 +65,7 @@ async def test_concurrency(n_clients):
 async def test_throughput(n_concurrent_streams, direction='upload'):
     print(f"[*] Starting Throughput Test: {direction}, streams={n_concurrent_streams}")
     CHUNK_SIZE = 64 * 1024 # 64KB
-    TOTAL_SIZE = 1 * 1024 * 1024 # 1MB
+    TOTAL_SIZE = 10 * 1024 * 1024 # 10MB
     data = b'x' * CHUNK_SIZE
     
     async def upload_worker(client_id):
