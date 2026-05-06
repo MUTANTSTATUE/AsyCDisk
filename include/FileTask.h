@@ -15,6 +15,6 @@ struct FileTask {
     bool is_uploading = false;
     uint32_t pending_fs_reqs = 0;
     bool closing_pending = false;
-    char file_read_buf[16384]; // 16KB read buffer per stream
+    char file_read_buf[131072]; // 128KB read buffer per stream
 };
 

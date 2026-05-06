@@ -10,16 +10,23 @@ struct IOCtx {
   uint32_t stream_id;
 };
 
-Session::Session(uv_loop_t *loop) {
+Session::Session(uv_loop_t *loop) : active_handles_(0) {
   uv_tcp_init(loop, &socket_);
   socket_.data = this;
+  active_handles_++;
+
   uv_timer_init(loop, &rate_timer_);
   rate_timer_.data = this;
+  active_handles_++;
+  
+  // Initial config load
+  cached_upload_limit_ = Config::GetInstance().Get<int>("limits/upload_kbps", 0);
+  cached_download_limit_ = Config::GetInstance().Get<int>("limits/download_kbps", 0);
+
   uv_timer_start(&rate_timer_, Session::OnRateTimer, 1000, 1000);
 }
 
 Session::~Session() {
-  uv_timer_stop(&rate_timer_);
   LOG_INFO("Session destroyed.");
 }
 
@@ -27,6 +34,10 @@ void Session::OnRateTimer(uv_timer_t *handle) {
     Session *session = static_cast<Session *>(handle->data);
     session->upload_bytes_this_sec_ = 0;
     session->download_bytes_this_sec_ = 0;
+    
+    // Refresh cached limits once per second
+    session->cached_upload_limit_ = Config::GetInstance().Get<int>("limits/upload_kbps", 0);
+    session->cached_download_limit_ = Config::GetInstance().Get<int>("limits/download_kbps", 0);
     
     // Resume Uploads
     if (session->is_reading_paused_) {
@@ -58,9 +69,13 @@ void Session::Start() {
 }
 
 void Session::Close() {
-  if (!uv_is_closing((uv_handle_t *)&socket_)) {
-    uv_close((uv_handle_t *)&socket_, Session::OnClose);
-  }
+  CloseHandle((uv_handle_t *)&socket_);
+  CloseHandle((uv_handle_t *)&rate_timer_);
+}
+
+void Session::CloseHandle(uv_handle_t *handle) {
+  if (uv_is_closing(handle)) return;
+  uv_close(handle, Session::OnClose);
 }
 
 void Session::Send(const char *data, size_t len) {
@@ -98,7 +113,7 @@ void Session::OnRead(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     
     // Rate Limiting (Upload)
     session->upload_bytes_this_sec_ += nread;
-    int upload_limit_kbps = Config::GetInstance().Get<int>("limits/upload_kbps", 0);
+    int upload_limit_kbps = session->cached_upload_limit_;
     if (upload_limit_kbps > 0 && session->upload_bytes_this_sec_ >= (uint64_t)upload_limit_kbps * 1024) {
         session->is_reading_paused_ = true;
         uv_read_stop(stream);
@@ -133,12 +148,16 @@ void Session::OnWrite(uv_write_t *req, int status) {
 
 void Session::OnClose(uv_handle_t *handle) {
   Session *session = static_cast<Session *>(handle->data);
-  LOG_INFO("Session closed handle.");
-  if (session->on_close_) {
-    session->on_close_(session->self_ref_);
+  session->active_handles_--;
+  LOG_INFO("Session handle closed. Remaining handles: {}", session->active_handles_);
+
+  if (session->active_handles_ == 0) {
+    if (session->on_close_) {
+      session->on_close_(session->self_ref_);
+    }
+    // Release self-reference, allowing the object to be destroyed
+    session->self_ref_.reset();
   }
-  // Release self-reference, allowing the object to be destroyed
-  session->self_ref_.reset();
 }
 
 void Session::ProcessBuffer() {
@@ -854,19 +873,26 @@ void Session::OnFileRead(uv_fs_t *req) {
 
     // Rate Limiting (Download)
     session->download_bytes_this_sec_ += bytes_read;
-    int download_limit_kbps = Config::GetInstance().Get<int>("limits/download_kbps", 0);
-    
+    int download_limit_kbps = session->cached_download_limit_;
     if (download_limit_kbps > 0 && session->download_bytes_this_sec_ >= (uint64_t)download_limit_kbps * 1024) {
         // Suspend this stream. It will be resumed by OnRateTimer.
         session->suspended_downloads_.insert(sid);
         uv_fs_req_cleanup(req);
-        delete req; // In this case we delete the req because a new one will be created upon resume
+        delete ctx; // Fix leak: ctx holds shared_ptr<Session>
+        delete req; 
         return;
     }
 
     uv_buf_t buf = uv_buf_init(task->file_read_buf, sizeof(task->file_read_buf));
-    uv_fs_read(session->socket_.loop, req, task->file_handle, &buf, 1,
-               task->file_offset, Session::OnFileRead);
+    int r = uv_fs_read(session->socket_.loop, req, task->file_handle, &buf, 1,
+                       task->file_offset, Session::OnFileRead);
+    if (r < 0) {
+        LOG_ERROR("uv_fs_read start error for stream {}: {}", sid, uv_strerror(r));
+        session->SendResponse(Protocol::Command::DownloadData, 500, sid,
+                              {{"msg", "read error"}}, {});
+        uv_fs_close(session->socket_.loop, req, task->file_handle,
+                    Session::OnFileClose);
+    }
 
   } else if (req->result == 0) {
     // EOF

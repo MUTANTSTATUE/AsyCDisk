@@ -73,6 +73,12 @@ private:
   void ResetRateLimits();
   static void OnRateTimer(uv_timer_t *handle);
   
+  void CloseHandle(uv_handle_t* handle);
+  int active_handles_ = 0;
+
+  int cached_upload_limit_ = 0;
+  int cached_download_limit_ = 0;
+  
   std::set<uint32_t> suspended_downloads_; // 存储因限速被挂起的下载 Stream ID
 
   static void OnFileOpen(uv_fs_t *req);

@@ -15,7 +15,7 @@ void Logger::Init() {
     
     logger_ = std::make_shared<spdlog::async_logger>("AsyCDisk", sinks.begin(), sinks.end(), spdlog::thread_pool(), spdlog::async_overflow_policy::block);
     logger_->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] [%s:%#] %v");
-    logger_->set_level(spdlog::level::trace);
+    logger_->set_level(spdlog::level::info);
     logger_->flush_on(spdlog::level::info);
     
     spdlog::register_logger(logger_);
