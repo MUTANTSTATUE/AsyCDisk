@@ -33,6 +33,8 @@ public:
   void Close();
 
   bool Login(const std::string &user, const std::string &pass);
+  bool Register(const std::string &user, const std::string &pass);
+  int GetCurrentUserId() const { return current_user_id_; }
   json List(int parent_id = 0);
   json GetAllDirs();
   void Upload(const std::string &local_path, int parent_id = 0,
@@ -60,7 +62,8 @@ public:
   struct IncompleteTask {
       int file_id;
       std::string filename;
-      std::string username; // 新增用户名字段
+      int user_id; // 统一使用 user_id 识别
+      std::string username; 
       uint64_t total_size;
       uint64_t current_offset;
       std::string local_path;
@@ -69,6 +72,7 @@ public:
   static std::vector<IncompleteTask> ScanIncompleteDownloads(const std::string &directory);
 
 private:
+  int current_user_id_ = -1;
   std::string current_user_; // 记录当前登录用户
   void ShowProgressBar(uint64_t current, uint64_t total);
   std::string FormatSize(uint64_t bytes);

@@ -44,3 +44,15 @@ std::vector<uint8_t> CryptoUtils::DeriveKey(const std::string& password) {
     SHA256((const uint8_t*)password.c_str(), password.length(), key.data());
     return key;
 }
+
+std::string CryptoUtils::HashPassword(const std::string& password) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256((const unsigned char*)password.c_str(), password.length(), hash);
+    
+    char hex[65];
+    for(int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+        sprintf(hex + (i * 2), "%02x", hash[i]);
+    }
+    hex[64] = '\0';
+    return std::string(hex);
+}

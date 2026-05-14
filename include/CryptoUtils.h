@@ -14,4 +14,6 @@ public:
 
     // 辅助：从字符串（如用户密码）生成 32 字节密钥
     static std::vector<uint8_t> DeriveKey(const std::string& password);
+
+    static std::string HashPassword(const std::string& password);
 };

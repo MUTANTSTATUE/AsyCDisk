@@ -1,5 +1,6 @@
 #include "Database.h"
 #include "Logger.h"
+#include "CryptoUtils.h"
 
 Database& Database::GetInstance() {
     static Database instance;
@@ -48,9 +49,6 @@ bool Database::Open(const std::string& db_path) {
         sqlite3_free(errMsg);
         return false;
     }
-
-    // Add a default test user if not exists
-    Execute("INSERT OR IGNORE INTO users (username, password) VALUES ('admin', 'admin123');");
 
     return true;
 }
@@ -122,8 +120,9 @@ bool Database::AuthenticateUser(const std::string& username, const std::string& 
         return false;
     }
 
+    std::string hashed = CryptoUtils::HashPassword(password);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, password.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, hashed.c_str(), -1, SQLITE_STATIC);
 
     bool success = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -146,8 +145,9 @@ bool Database::RegisterUser(const std::string& username, const std::string& pass
         return false;
     }
 
+    std::string hashed = CryptoUtils::HashPassword(password);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, password.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, hashed.c_str(), -1, SQLITE_STATIC);
 
     bool success = (sqlite3_step(stmt) == SQLITE_DONE);
     if (!success) {
