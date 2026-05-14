@@ -418,12 +418,10 @@ void AsyCClient::Download(int file_id, const std::string &local_path,
     {
         std::ofstream meta_f(meta_path);
         if (meta_f) {
+            // 极致精简：仅保存文件 ID 和总大小
             json meta_j = {
-                {"file_id", file_id},
-                {"filename", filename},
-                {"user_id", current_user_id_},
-                {"username", current_user_},
-                {"total_size", filesize}
+                {"i", file_id},
+                {"s", filesize}
             };
             meta_f << meta_j.dump();
         }
@@ -472,8 +470,9 @@ void AsyCClient::Download(int file_id, const std::string &local_path,
     
     file.close(); 
     if (aborted_internally) {
-        // 中断不删除 .tmp，保留以供下次续传
-        std::cout << "[Stream #" << sid << " INFO] Download paused/aborted, kept .tmp file." << std::endl;
+        std::cout << "[Stream #" << sid << " INFO] Download canceled, removing temporary files." << std::endl;
+        std::remove(tmp_path.c_str());
+        std::remove(meta_path.c_str());
     } else if (downloaded >= filesize) {
         // 完成：转正并删除元数据
         if (std::rename(tmp_path.c_str(), target_path.c_str()) == 0) {
@@ -611,11 +610,11 @@ std::vector<AsyCClient::IncompleteTask> AsyCClient::ScanIncompleteDownloads(cons
                     meta_f >> meta_j;
                     
                     IncompleteTask task;
-                    task.file_id = meta_j["file_id"];
-                    task.filename = meta_j["filename"];
-                    task.user_id = meta_j.value("user_id", -1);
-                    task.username = meta_j.value("username", ""); // 读取用户名
-                    task.total_size = meta_j["total_size"];
+                    task.file_id = meta_j.value("i", 0);
+                    task.total_size = meta_j.value("s", (uint64_t)0);
+                    task.filename = filename.substr(0, filename.size() - 9); // 从文件名中恢复
+                    task.user_id = -1; // 从目录结构获取，此处保持兼容
+                    task.username = ""; 
                     task.local_path = original_path;
                     
                     // 获取 .tmp 文件实际大小
