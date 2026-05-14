@@ -216,8 +216,29 @@ bool AsyCClient::Login(const std::string &user, const std::string &pass) {
               << std::endl;
     success = true;
     current_user_ = user;
+    current_user_id_ = msg.json_payload.value("user_id", -1);
+    std::cout << "[OK] Login successful for " << user << " (ID: " << current_user_id_ << ")" << std::endl;
+  }
+  DeleteStream(sid);
+  return success;
+}
+
+bool AsyCClient::Register(const std::string &user, const std::string &pass) {
+  uint32_t sid = next_stream_id_++;
+  CreateStream(sid);
+  if (!SendPacket(Protocol::Command::Register, sid,
+                  {{"username", user}, {"password", pass}})) {
+    DeleteStream(sid);
+    return false;
+  }
+  
+  auto msg = WaitNextMessage(sid);
+  bool success = false;
+  if (msg.header.magic != 0 && msg.header.status == 200) {
+    std::cout << "[OK] Registration successful." << std::endl;
+    success = true;
   } else {
-    std::cout << "[ERR] Login failed: " << msg.json_payload.value("msg", "unknown error")
+    std::cout << "[ERR] Registration failed: " << msg.json_payload.value("msg", "unknown error")
               << std::endl;
   }
   DeleteStream(sid);
@@ -400,7 +421,8 @@ void AsyCClient::Download(int file_id, const std::string &local_path,
             json meta_j = {
                 {"file_id", file_id},
                 {"filename", filename},
-                {"username", current_user_}, // 保存用户名
+                {"user_id", current_user_id_},
+                {"username", current_user_},
                 {"total_size", filesize}
             };
             meta_f << meta_j.dump();
@@ -591,6 +613,7 @@ std::vector<AsyCClient::IncompleteTask> AsyCClient::ScanIncompleteDownloads(cons
                     IncompleteTask task;
                     task.file_id = meta_j["file_id"];
                     task.filename = meta_j["filename"];
+                    task.user_id = meta_j.value("user_id", -1);
                     task.username = meta_j.value("username", ""); // 读取用户名
                     task.total_size = meta_j["total_size"];
                     task.local_path = original_path;
