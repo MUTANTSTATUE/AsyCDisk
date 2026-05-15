@@ -44,6 +44,9 @@ public:
   void Download(int file_id, const std::string &local_path = "",
                 std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
   
+  void ShowProgressBar(uint64_t current, uint64_t total);
+  std::string FormatSize(uint64_t bytes);
+  
   // Stream download for HTTP proxy preview
   void StreamDownload(int file_id, uint64_t offset,
                       std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb);
@@ -76,8 +79,6 @@ public:
 private:
   int current_user_id_ = -1;
   std::string current_user_; 
-  void ShowProgressBar(uint64_t current, uint64_t total);
-  std::string FormatSize(uint64_t bytes);
   
   bool SendPacket(Protocol::Command cmd, uint32_t stream_id,
                   const json &j_payload,
