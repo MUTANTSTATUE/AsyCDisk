@@ -35,6 +35,8 @@ public:
   bool Login(const std::string &user, const std::string &pass);
   bool Register(const std::string &user, const std::string &pass);
   int GetCurrentUserId() const { return current_user_id_; }
+  std::string GetCurrentUsername() const { return current_user_; }
+  
   json List(int parent_id = 0);
   json GetAllDirs();
   void Upload(const std::string &local_path, int parent_id = 0,
@@ -62,7 +64,7 @@ public:
   struct IncompleteTask {
       int file_id;
       std::string filename;
-      int user_id; // 统一使用 user_id 识别
+      int user_id; 
       std::string username; 
       uint64_t total_size;
       uint64_t current_offset;
@@ -73,7 +75,7 @@ public:
 
 private:
   int current_user_id_ = -1;
-  std::string current_user_; // 记录当前登录用户
+  std::string current_user_; 
   void ShowProgressBar(uint64_t current, uint64_t total);
   std::string FormatSize(uint64_t bytes);
   
@@ -83,10 +85,14 @@ private:
                   
   bool RecvPacket(Protocol::Message &msg);
   void ReceiverLoop();
+  void ReceiverLoop_Stream(int file_id, uint64_t offset, uint32_t sid,
+                           std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb);
+
   Protocol::Message WaitNextMessage(uint32_t stream_id);
   
   void CreateStream(uint32_t sid);
   void DeleteStream(uint32_t sid);
+  void AddWorker(std::thread &&t);
 
   std::string ip_;
   uint16_t port_;
@@ -99,4 +105,7 @@ private:
   
   std::map<uint32_t, std::shared_ptr<StreamContext>> streams_;
   std::mutex streams_mutex_;
+
+  std::vector<std::thread> workers_;
+  std::mutex workers_mutex_;
 };

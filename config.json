@@ -17,5 +17,9 @@
     },
     "performance": {
         "read_buffer_size": 131072
+    },
+    "libuv": {
+        "threadpool_size": 4,
+        "use_io_uring": true
     }
 }

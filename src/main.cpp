@@ -1,26 +1,43 @@
+#include "Config.h"
 #include "Database.h"
 #include "EventLoop.h"
 #include "Logger.h"
 #include "Session.h"
 #include "TcpServer.h"
-#include "Config.h"
+#include <cstdlib>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
+#include <string>
 #include <uv.h>
+
 int main() {
   Logger::Init();
   LOG_INFO("AsyCDisk Server Starting...");
 
   // 加载配置文件 (必须在这里！)
   if (!Config::GetInstance().Load("config.json")) {
-      LOG_ERROR("CRITICAL: Failed to load config.json! Check if file exists in CWD.");
+    LOG_ERROR(
+        "CRITICAL: Failed to load config.json! Check if file exists in CWD.");
   } else {
-      LOG_INFO("Config file loaded. Upload limit: {} KB/s", Config::GetInstance().Get<int>("limits/upload_kbps", -1));
+    // 必须在任何 libuv 函数调用前设置环境变量，否则不会生效
+    int tp_size = Config::GetInstance().Get<int>("libuv/threadpool_size", 4);
+    bool use_io_uring =
+        Config::GetInstance().Get<bool>("libuv/use_io_uring", true);
+
+    setenv("UV_THREADPOOL_SIZE", std::to_string(tp_size).c_str(), 1);
+    setenv("UV_USE_IO_URING", use_io_uring ? "1" : "0", 1);
+
+    LOG_INFO(
+        "Config loaded. ThreadPool: {}, io_uring: {}, Upload limit: {} KB/s",
+        tp_size, use_io_uring,
+        Config::GetInstance().Get<int>("limits/upload_kbps", -1));
   }
 
-  std::string db_path = Config::GetInstance().Get<std::string>("storage/db_path", "asycdisk.db");
-  std::string data_dir = Config::GetInstance().Get<std::string>("storage/data_dir", "data");
+  std::string db_path =
+      Config::GetInstance().Get<std::string>("storage/db_path", "asycdisk.db");
+  std::string data_dir =
+      Config::GetInstance().Get<std::string>("storage/data_dir", "data");
   int port = Config::GetInstance().Get<int>("server/port", 8080);
 
   // Initialize Database
