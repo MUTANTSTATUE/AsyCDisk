@@ -509,7 +509,7 @@ void AsyCClient::Download(int file_id, const std::string &local_path,
   }));
 }
 
-void AsyCClient::StreamDownload(int file_id, uint64_t offset,
+uint32_t AsyCClient::StreamDownload(int file_id, uint64_t offset,
                                 std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
@@ -518,6 +518,7 @@ void AsyCClient::StreamDownload(int file_id, uint64_t offset,
     ReceiverLoop_Stream(file_id, offset, sid, cb);
     DeleteStream(sid);
   }));
+  return sid;
 }
 
 void AsyCClient::ReceiverLoop_Stream(int file_id, uint64_t offset, uint32_t sid,

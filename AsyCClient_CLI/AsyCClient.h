@@ -49,7 +49,7 @@ public:
   std::string FormatSize(uint64_t bytes);
   
   // Stream download for HTTP proxy preview
-  void StreamDownload(int file_id, uint64_t offset,
+  uint32_t StreamDownload(int file_id, uint64_t offset,
                       std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb);
                       
   void Remove(int file_id, 

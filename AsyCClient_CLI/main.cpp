@@ -43,7 +43,7 @@ int main() {
     if (cmd == "exit")
       break;
     else if (cmd == "help") {
-      std::cout << "Commands: login <user> <pass>, ls [id], cd <name|id|..>, pwd, mkdir <name>, put <path>, get <id>, rm <id>, exit"
+      std::cout << "Commands: login <user> <pass>, ls [id], cd <name|id|..>, pwd, mkdir <name>, put <path>, get <id>, rm <id>, mv <id> <new_pid>, exit"
                 << std::endl;
     } else if (cmd == "login") {
       std::string u, p;
@@ -143,6 +143,15 @@ int main() {
           });
       } catch (...) {
           std::cout << "Invalid file ID." << std::endl;
+      }
+    } else if (cmd == "mv") {
+      int file_id, new_pid;
+      if (ss >> file_id >> new_pid) {
+          client.Move(file_id, new_pid, [](bool success, std::string msg) {
+              std::cout << (success ? "[OK] " : "[ERR] ") << msg << std::endl;
+          });
+      } else {
+          std::cout << "Usage: mv <file_id> <new_parent_id>" << std::endl;
       }
     }
   }

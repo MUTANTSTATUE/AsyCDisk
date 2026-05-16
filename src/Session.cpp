@@ -144,7 +144,7 @@ void Session::OnRead(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
 }
 
 void Session::OnWrite(uv_write_t *req, int status) {
-  if (status < 0) {
+  if (status < 0 && status != UV_ECANCELED && status != UV_ECONNRESET) {
     LOG_ERROR("Write error: {}", uv_strerror(status));
   }
 
