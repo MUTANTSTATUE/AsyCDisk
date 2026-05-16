@@ -6,6 +6,8 @@
 #include <memory>
 #include <unordered_map>
 #include <set>
+#include <map>
+#include <mutex>
 #include <uv.h>
 #include <vector>
 
@@ -24,6 +26,12 @@ public:
   // Send data helper
   void Send(const char *data, size_t len);
 
+  // --- 静态成员：用于防止重复登录 ---
+  static std::map<int, Session*> online_users_;
+  static std::mutex online_users_mtx_;
+  static bool RegisterOnlineUser(int user_id, Session* session);
+  static void UnregisterOnlineUser(int user_id, Session* session);
+
 private:
   void ProcessBuffer();
   void HandleMessage(const Protocol::Message &msg);
@@ -41,6 +49,7 @@ private:
   void HandleMakeDir(const Protocol::Message &req);
   void HandleRemove(const Protocol::Message &req);
   void HandleMove(const Protocol::Message &req);
+  void HandleSearch(const Protocol::Message &req);
   void HandleUploadReq(const Protocol::Message &req);
   void HandleUploadData(const Protocol::Message &req);
   void HandleDownloadReq(const Protocol::Message &req);

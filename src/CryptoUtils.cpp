@@ -45,9 +45,10 @@ std::vector<uint8_t> CryptoUtils::DeriveKey(const std::string& password) {
     return key;
 }
 
-std::string CryptoUtils::HashPassword(const std::string& password) {
+std::string CryptoUtils::HashPassword(const std::string& password, const std::string& salt) {
+    std::string salted_password = password + salt;
     unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256((const unsigned char*)password.c_str(), password.length(), hash);
+    SHA256((const unsigned char*)salted_password.c_str(), salted_password.length(), hash);
     
     char hex[65];
     for(int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
@@ -55,4 +56,21 @@ std::string CryptoUtils::HashPassword(const std::string& password) {
     }
     hex[64] = '\0';
     return std::string(hex);
+}
+
+#include <openssl/rand.h>
+#include <iomanip>
+
+std::string CryptoUtils::GenerateSalt(size_t length) {
+    std::vector<unsigned char> salt(length);
+    if (RAND_bytes(salt.data(), length) != 1) {
+        // Fallback or error handling
+        return "default_salt_error";
+    }
+    
+    std::stringstream ss;
+    for(unsigned char c : salt) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)c;
+    }
+    return ss.str();
 }

@@ -42,6 +42,7 @@ enum class Command : uint16_t {
   Register = 5,
   Move = 6,
   ListAllDirs = 7,
+  Search = 8,
 
   // File Transfer
   UploadReq = 10,  // Request to upload a file (contains file metadata in JSON)

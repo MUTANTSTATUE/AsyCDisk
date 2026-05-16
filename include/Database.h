@@ -34,6 +34,7 @@ public:
     
     // Get all directories for a user
     nlohmann::json GetAllDirectories(int user_id);
+    nlohmann::json SearchFiles(int user_id, const std::string& keyword);
 
 private:
     Database() = default;

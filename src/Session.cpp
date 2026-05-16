@@ -4,6 +4,12 @@
 #include "Config.h"
 #include <cstring>
 #include <uv.h>
+#include <map>
+#include <mutex>
+
+// 静态成员初始化
+std::map<int, Session*> Session::online_users_;
+std::mutex Session::online_users_mtx_;
 
 struct IOCtx {
   std::shared_ptr<Session> session;
@@ -27,6 +33,7 @@ Session::Session(uv_loop_t *loop) : active_handles_(0) {
 }
 
 Session::~Session() {
+  UnregisterOnlineUser(user_id_, this);
   LOG_INFO("Session destroyed.");
 }
 
@@ -242,6 +249,9 @@ void Session::HandleMessage(const Protocol::Message &msg) {
   case Protocol::Command::MakeDir:
     HandleMakeDir(msg);
     break;
+  case Protocol::Command::Search:
+    HandleSearch(msg);
+    break;
   case Protocol::Command::Remove:
     HandleRemove(msg);
     break;
@@ -312,6 +322,16 @@ void Session::HandleLogin(const Protocol::Message &req) {
 
   if (Database::GetInstance().AuthenticateUser(username, password, user_id_)) {
     user_key_ = CryptoUtils::DeriveKey(password);
+    
+    // 防止重复登录：如果已在线，拒绝新登录
+    if (!RegisterOnlineUser(user_id_, this)) {
+        LOG_WARN("Login denied for user {}: already online.", username);
+        SendResponse(Protocol::Command::Login, 403, req.header.stream_id,
+                     {{"msg", "该账号已在别处登录，请先退出。"}}, {});
+        user_id_ = -1; // 重置 ID，防止被析构函数错误注销
+        return;
+    }
+
     LOG_INFO("Login success for user: {} (ID: {})", username, user_id_);
     SendResponse(Protocol::Command::Login, 200, req.header.stream_id,
                  {{"msg", "login success"}, {"user_id", user_id_}}, {});
@@ -416,6 +436,21 @@ void Session::HandleMove(const Protocol::Message &req) {
     SendResponse(Protocol::Command::Move, 500, req.header.stream_id,
                  {{"msg", "db error"}}, {});
   }
+}
+
+void Session::HandleSearch(const Protocol::Message &msg) {
+  if (user_id_ == -1) {
+    SendResponse(Protocol::Command::Search, 401, msg.header.stream_id,
+                 {{"error", "Not logged in"}}, {});
+    return;
+  }
+
+  std::string keyword = msg.json_payload.value("keyword", "");
+  nlohmann::json files = Database::GetInstance().SearchFiles(user_id_, keyword);
+
+  nlohmann::json resp;
+  resp["files"] = files;
+  SendResponse(Protocol::Command::Search, 200, msg.header.stream_id, resp, {});
 }
 
 void Session::HandleRemove(const Protocol::Message &req) {
@@ -839,6 +874,29 @@ void Session::OnFileClose(uv_fs_t *req) {
   uv_fs_req_cleanup(req);
   delete ctx;
   delete req;
+}
+
+bool Session::RegisterOnlineUser(int user_id, Session* session) {
+  std::lock_guard<std::mutex> lock(online_users_mtx_);
+  
+  auto it = online_users_.find(user_id);
+  if (it != online_users_.end()) {
+      // 已经有人在线，拒绝新的注册请求
+      return false;
+  }
+  online_users_[user_id] = session;
+  return true;
+}
+
+void Session::UnregisterOnlineUser(int user_id, Session* session) {
+  if (user_id == -1) return;
+  std::lock_guard<std::mutex> lock(online_users_mtx_);
+  auto it = online_users_.find(user_id);
+  
+  // 只有当记录的 session 确实是当前这个 session 时才移除
+  if (it != online_users_.end() && it->second == session) {
+      online_users_.erase(it);
+  }
 }
 
 void Session::OnFileWrite(uv_fs_t *req) {

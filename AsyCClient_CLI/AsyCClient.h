@@ -39,6 +39,7 @@ public:
   
   json List(int parent_id = 0);
   json GetAllDirs();
+  json Search(const std::string &keyword);
   void Upload(const std::string &local_path, int parent_id = 0,
               std::function<void(uint32_t sid, uint64_t cur, uint64_t total)> cb = nullptr);
   void Download(int file_id, const std::string &local_path = "",
@@ -63,6 +64,8 @@ public:
   void AbortStream(uint32_t sid);
   void PauseStream(uint32_t sid);
   void ResumeStream(uint32_t sid);
+  
+  void SetOnKicked(std::function<void()> cb) { on_kicked_ = cb; }
 
   struct IncompleteTask {
       int file_id;
@@ -109,4 +112,6 @@ private:
 
   std::vector<std::thread> workers_;
   std::mutex workers_mutex_;
+  
+  std::function<void()> on_kicked_;
 };

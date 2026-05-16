@@ -214,6 +214,13 @@ void AsyCClient::ReceiverLoop() {
       }
       break;
     }
+    
+    // 捕获“被踢下线”消息 (登录响应且状态码为 403)
+    if (msg.header.command == static_cast<uint16_t>(Protocol::Command::Login) && 
+        msg.header.status == 403) {
+        if (on_kicked_) on_kicked_();
+        continue;
+    }
 
     std::lock_guard<std::mutex> lock(streams_mutex_);
     auto it = streams_.find(msg.header.stream_id);
@@ -314,6 +321,23 @@ json AsyCClient::GetAllDirs() {
   json result = {};
   if (msg.header.magic != 0 && msg.header.status == 200) {
     result = msg.json_payload["dirs"];
+  }
+  DeleteStream(sid);
+  return result;
+}
+
+json AsyCClient::Search(const std::string &keyword) {
+  uint32_t sid = next_stream_id_++;
+  CreateStream(sid);
+  if (!SendPacket(Protocol::Command::Search, sid, {{"keyword", keyword}})) {
+    DeleteStream(sid);
+    return {};
+  }
+  
+  auto msg = WaitNextMessage(sid);
+  json result = json::array();
+  if (msg.header.magic != 0 && msg.header.status == 200) {
+    result = msg.json_payload.value("files", json::array());
   }
   DeleteStream(sid);
   return result;

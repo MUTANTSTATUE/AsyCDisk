@@ -10,3 +10,4 @@ AsyCClient_CLI/CMakeFiles/
 AsyCClient_CLI/cmake_install.cmake
 AsyCClient_CLI/CMakeCache.txt
 AsyCClient_CLI/Makefile
+.pytest_cache/
