@@ -9,8 +9,8 @@
         "db_path": "asycdisk.db"
     },
     "limits": {
-        "upload_kbps": 5000,
-        "download_kbps": 5000
+        "upload_kbps": 100,
+        "download_kbps": 100
     },
     "security": {
         "encryption_enabled": true

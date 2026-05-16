@@ -50,7 +50,7 @@ public:
   
   // Stream download for HTTP proxy preview
   uint32_t StreamDownload(int file_id, uint64_t offset,
-                      std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb);
+                      std::function<bool(uint32_t sid, const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb);
                       
   void Remove(int file_id, 
               std::function<void(bool success, std::string message)> cb = nullptr);
@@ -90,7 +90,7 @@ private:
   bool RecvPacket(Protocol::Message &msg);
   void ReceiverLoop();
   void ReceiverLoop_Stream(int file_id, uint64_t offset, uint32_t sid,
-                           std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb);
+                           std::function<bool(uint32_t sid, const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb);
 
   Protocol::Message WaitNextMessage(uint32_t stream_id);
   

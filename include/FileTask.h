@@ -16,6 +16,7 @@ struct FileTask {
     bool is_uploading = false;
     uint32_t pending_fs_reqs = 0;
     bool closing_pending = false;
+    bool is_streaming = false;
     std::vector<char> file_read_buf;
 };
 

@@ -14,6 +14,7 @@ std::mutex Session::online_users_mtx_;
 struct IOCtx {
   std::shared_ptr<Session> session;
   uint32_t stream_id;
+  std::shared_ptr<FileTask> task; // Keeps buffers alive during pending async operations
 };
 
 Session::Session(uv_loop_t *loop) : active_handles_(0) {
@@ -60,7 +61,7 @@ void Session::OnRateTimer(uv_timer_t *handle) {
                 auto task = it->second;
                 uv_buf_t buf = uv_buf_init(task->file_read_buf.data(), task->file_read_buf.size());
                 uv_fs_t *read_req = new uv_fs_t();
-                read_req->data = new IOCtx{session->shared_from_this(), sid};
+                read_req->data = new IOCtx{session->shared_from_this(), sid, task};
                 uv_fs_read(session->socket_.loop, read_req, task->file_handle, &buf, 1,
                            task->file_offset, Session::OnFileRead);
             }
@@ -575,7 +576,7 @@ void Session::HandleUploadReq(const Protocol::Message &req) {
   // 3. Open file for writing
   task->file_offset = current_offset;
   uv_fs_t *open_req = new uv_fs_t();
-  open_req->data = new IOCtx{shared_from_this(), stream_id};
+  open_req->data = new IOCtx{shared_from_this(), stream_id, task};
 
   int r = uv_fs_open(socket_.loop, open_req, full_path.c_str(), O_WRONLY | O_CREAT,
                  0644, Session::OnFileOpen);
@@ -606,7 +607,7 @@ void Session::HandleUploadData(const Protocol::Message &req) {
 
     if (task->pending_fs_reqs == 0) {
       uv_fs_t *close_req = new uv_fs_t();
-      close_req->data = new IOCtx{shared_from_this(), stream_id};
+      close_req->data = new IOCtx{shared_from_this(), stream_id, task};
       uv_fs_close(socket_.loop, close_req, task->file_handle,
                   Session::OnFileClose);
       task->closing_pending = false;
@@ -658,7 +659,7 @@ void Session::HandleUploadData(const Protocol::Message &req) {
           if (task->closing_pending && task->pending_fs_reqs == 0) {
             LOG_INFO("Last write finished for stream {}. Closing file.", sid);
             uv_fs_t *close_req = new uv_fs_t();
-            close_req->data = new IOCtx{session, sid};
+            close_req->data = new IOCtx{session, sid, task};
             uv_fs_close(session->socket_.loop, close_req, task->file_handle,
                         Session::OnFileClose);
             task->closing_pending = false;
@@ -686,7 +687,7 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
       auto task = it->second;
       if (task->file_handle >= 0) {
         uv_fs_t *close_req = new uv_fs_t();
-        close_req->data = new IOCtx{shared_from_this(), sid};
+        close_req->data = new IOCtx{shared_from_this(), sid, task};
         uv_fs_close(socket_.loop, close_req, task->file_handle, Session::OnFileClose);
         task->file_handle = -1; // Prevent double close in pending reads
       } else {
@@ -704,7 +705,7 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   }
 
   int file_id = req.json_payload.value("file_id", -1);
-  uint64_t offset = req.json_payload.value("offset", 0);
+  uint64_t offset = req.json_payload.value("offset", static_cast<uint64_t>(0));
   uint32_t stream_id = req.header.stream_id;
 
   if (file_id == -1) {
@@ -731,6 +732,7 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
   task->full_path = path;
   task->file_offset = offset;
   task->is_uploading = false;
+  task->is_streaming = req.json_payload.value("is_streaming", false);
   
   int buf_size = Config::GetInstance().Get<int>("performance/read_buffer_size", 131072);
   task->file_read_buf.resize(buf_size);
@@ -739,7 +741,7 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
 
   // Open file for reading
   uv_fs_t *open_req = new uv_fs_t();
-  open_req->data = new IOCtx{shared_from_this(), stream_id};
+  open_req->data = new IOCtx{shared_from_this(), stream_id, task};
 
   int r = uv_fs_open(
       socket_.loop, open_req, path.c_str(), O_RDONLY, 0, [](uv_fs_t *req) {
@@ -749,8 +751,13 @@ void Session::HandleDownloadReq(const Protocol::Message &req) {
 
         auto it = session->active_tasks_.find(sid);
         if (it == session->active_tasks_.end()) {
-          LOG_ERROR("Task not found for stream {} in HandleDownloadReq open",
-                    sid);
+          LOG_ERROR("Task not found for stream {} in HandleDownloadReq open (likely aborted)", sid);
+          if (req->result >= 0) {
+              uv_fs_t *close_req = new uv_fs_t();
+              close_req->data = new IOCtx{session, sid, nullptr};
+              uv_fs_close(session->socket_.loop, close_req, req->result, Session::OnFileClose);
+          }
+          uv_fs_req_cleanup(req);
           delete ctx;
           delete req;
           return;
@@ -812,7 +819,13 @@ void Session::OnFileOpen(uv_fs_t *req) {
 
   auto it = session->active_tasks_.find(sid);
   if (it == session->active_tasks_.end()) {
-    LOG_ERROR("Task not found for stream {} in OnFileOpen", sid);
+    LOG_ERROR("Task not found for stream {} in OnFileOpen (likely aborted)", sid);
+    if (req->result >= 0) {
+        uv_fs_t *close_req = new uv_fs_t();
+        close_req->data = new IOCtx{session, sid, nullptr};
+        uv_fs_close(session->socket_.loop, close_req, req->result, Session::OnFileClose);
+    }
+    uv_fs_req_cleanup(req);
     delete ctx;
     delete req;
     return;
@@ -910,7 +923,7 @@ void Session::OnFileRead(uv_fs_t *req) {
 
   auto it = session->active_tasks_.find(sid);
   if (it == session->active_tasks_.end()) {
-    LOG_ERROR("Task not found for stream {} in OnFileRead", sid);
+    LOG_TRACE("Task already removed for stream {} in OnFileRead (normal if aborted)", sid);
     delete ctx;
     delete req;
     return;
@@ -936,7 +949,7 @@ void Session::OnFileRead(uv_fs_t *req) {
     // Rate Limiting (Download)
     session->download_bytes_this_sec_ += bytes_read;
     int download_limit_kbps = session->cached_download_limit_;
-    if (download_limit_kbps > 0 && session->download_bytes_this_sec_ >= (uint64_t)download_limit_kbps * 1024) {
+    if (!task->is_streaming && download_limit_kbps > 0 && session->download_bytes_this_sec_ >= (uint64_t)download_limit_kbps * 1024) {
         // Suspend this stream. It will be resumed by OnRateTimer.
         session->suspended_downloads_.insert(sid);
         uv_fs_req_cleanup(req);

@@ -116,6 +116,8 @@ void AsyCClient::AbortStream(uint32_t sid) {
   std::lock_guard<std::mutex> lock(streams_mutex_);
   if (streams_.count(sid)) {
     streams_[sid]->aborted = true;
+    // 通知服务器停止发送
+    SendPacket(Protocol::Command::DownloadReq, sid, {{"abort", true}});
     streams_[sid]->cv.notify_all();
   }
 }
@@ -190,7 +192,7 @@ bool AsyCClient::RecvPacket(Protocol::Message &msg) {
 
   if (msg.header.json_len > 0) {
     std::string j_str(msg.header.json_len, 0);
-    recv(sock_, &j_str[0], msg.header.json_len, MSG_WAITALL);
+    if (recv(sock_, &j_str[0], msg.header.json_len, MSG_WAITALL) != (ssize_t)msg.header.json_len) return false;
     try {
         msg.json_payload = json::parse(j_str);
     } catch (...) {
@@ -199,7 +201,7 @@ bool AsyCClient::RecvPacket(Protocol::Message &msg) {
   }
   if (msg.header.binary_len > 0) {
     msg.binary_payload.resize(msg.header.binary_len);
-    recv(sock_, &msg.binary_payload[0], msg.header.binary_len, MSG_WAITALL);
+    if (recv(sock_, &msg.binary_payload[0], msg.header.binary_len, MSG_WAITALL) != (ssize_t)msg.header.binary_len) return false;
   }
   return true;
 }
@@ -510,7 +512,7 @@ void AsyCClient::Download(int file_id, const std::string &local_path,
 }
 
 uint32_t AsyCClient::StreamDownload(int file_id, uint64_t offset,
-                                std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb) {
+                                 std::function<bool(uint32_t sid, const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb) {
   uint32_t sid = next_stream_id_++;
   CreateStream(sid);
 
@@ -522,8 +524,8 @@ uint32_t AsyCClient::StreamDownload(int file_id, uint64_t offset,
 }
 
 void AsyCClient::ReceiverLoop_Stream(int file_id, uint64_t offset, uint32_t sid,
-                                     std::function<bool(const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb) {
-    if (!SendPacket(Protocol::Command::DownloadReq, sid, {{"file_id", file_id}, {"offset", offset}})) {
+                                     std::function<bool(uint32_t sid, const std::vector<char>& chunk, uint64_t total_size, const std::string& filename, bool is_eof)> cb) {
+    if (!SendPacket(Protocol::Command::DownloadReq, sid, {{"file_id", file_id}, {"offset", offset}, {"is_streaming", true}})) {
       return;
     }
 
@@ -541,7 +543,7 @@ void AsyCClient::ReceiverLoop_Stream(int file_id, uint64_t offset, uint32_t sid,
       bool is_eof = (msg.header.magic == 0 || msg.header.binary_len == 0);
       
       if (cb) {
-        if (!cb(msg.binary_payload, filesize, filename, is_eof)) {
+        if (!cb(sid, msg.binary_payload, filesize, filename, is_eof)) {
           if (!is_eof && running_) {
             SendPacket(Protocol::Command::DownloadReq, sid, {{"abort", true}});
           }
